@@ -49,7 +49,7 @@ pip install transformers>=4.31.0 torch>=2.0.0
 
 ## Quick Start
 
-### 1. Training SpAF Components
+### 1. Training SpAF Components (Single GPU)
 
 ```python
 import json
@@ -113,7 +113,68 @@ for epoch in range(config['training']['num_epochs']):
     )
 ```
 
-### 2. Inference with SpAF
+### 2. Training SpAF Components (Multi-GPU with DeepSpeed)
+
+For efficient multi-GPU training, use the DeepSpeed-enabled training script:
+
+```bash
+# Prepare data first
+cd examples
+python train_spaf_deepspeed_example.py
+
+# Launch multi-GPU training (e.g., 2 GPUs)
+bash scripts/train_spaf_deepspeed.sh
+
+# Or use the auto-generated script
+bash launch_spaf_training.sh
+```
+
+**Manual launch with DeepSpeed:**
+
+```bash
+# Single machine with 2 GPUs
+deepspeed --num_gpus=2 gumiho/train/train_spaf_deepspeed.py \
+    --deepspeed_config gumiho/train/ds_config_spaf.json \
+    --base_model_path meta-llama/Llama-2-7b-hf \
+    --train_data_path ./train_data \
+    --checkpoint_dir ./spaf_checkpoints \
+    --num_epochs 3 \
+    --max_seq_length 512 \
+    --cutoff_layer 16
+
+# Multiple machines (distributed training)
+deepspeed --hostfile=hostfile.txt gumiho/train/train_spaf_deepspeed.py \
+    --deepspeed_config gumiho/train/ds_config_spaf.json \
+    --base_model_path meta-llama/Llama-2-7b-hf \
+    --train_data_path ./train_data \
+    --checkpoint_dir ./spaf_checkpoints
+```
+
+**DeepSpeed Configuration:**
+
+The `ds_config_spaf.json` file controls DeepSpeed optimization:
+- **ZeRO Stage 2**: Shards optimizer states and gradients across GPUs
+- **FP16 Training**: Mixed precision for faster training
+- **Optimizer Offloading**: Offloads optimizer states to CPU to save GPU memory
+- **Gradient Accumulation**: Accumulates gradients for effective larger batch sizes
+
+Adjust the configuration based on your hardware:
+
+```json
+{
+  "train_batch_size": 32,           # Total batch size across all GPUs
+  "train_micro_batch_size_per_gpu": 8,  # Batch size per GPU
+  "gradient_accumulation_steps": 1,
+  "zero_optimization": {
+    "stage": 2,                      # Use ZeRO-2 for balanced performance
+    "offload_optimizer": {
+      "device": "cpu"                # Offload to CPU to save GPU memory
+    }
+  }
+}
+```
+
+### 3. Inference with SpAF
 
 ```python
 import torch
@@ -182,14 +243,22 @@ Edit `gumiho/train/spaf_config.json` to customize:
 ```
 gumiho/
 ├── model/
-│   ├── spaf_modules.py          # Adapter and AlignmentHead definitions
-│   ├── spaf_model.py            # SpAFModel class
-│   └── modeling_llama_kv.py     # Modified LlamaDecoderLayer with adapter support
+│   ├── spaf_modules.py              # Adapter & AlignmentHead definitions
+│   ├── spaf_model.py                # SpAFModel class
+│   └── modeling_llama_kv.py         # Modified LlamaDecoderLayer with adapter support
 ├── train/
-│   ├── train_spaf.py            # Training logic and loss functions
-│   └── spaf_config.json         # Configuration file
-└── inference/
-    └── spaf_generate.py         # Inference functions (draft, verify, generate)
+│   ├── train_spaf.py                # Single-GPU training logic
+│   ├── train_spaf_deepspeed.py      # Multi-GPU training with DeepSpeed
+│   ├── spaf_config.json             # Configuration file
+│   └── ds_config_spaf.json          # DeepSpeed configuration
+├── inference/
+│   └── spaf_generate.py             # Inference functions (draft, verify, generate)
+├── examples/
+│   ├── train_spaf_example.py        # Single-GPU training example
+│   ├── train_spaf_deepspeed_example.py  # Multi-GPU setup example
+│   └── inference_spaf_example.py    # Inference example
+└── scripts/
+    └── train_spaf_deepspeed.sh      # Multi-GPU training launch script
 ```
 
 ## Key Features
@@ -253,16 +322,50 @@ speedup = baseline_time / spaf_time
 print(f"Speedup: {speedup:.2f}x")
 ```
 
+## Multi-GPU Training Benefits
+
+### Memory Efficiency
+- **ZeRO Optimization**: Reduces memory redundancy across GPUs
+- **Optimizer Offloading**: Moves optimizer states to CPU RAM
+- **Gradient Checkpointing**: Trades computation for memory
+
+### Speed Improvements
+- **Data Parallelism**: Each GPU processes different batches
+- **Gradient Accumulation**: Simulates larger batch sizes
+- **Communication Overlap**: Overlaps communication with computation
+
+### Scalability
+- **Single Machine**: 2-8 GPUs with DeepSpeed
+- **Multi-Node**: Scales to multiple machines with `--hostfile`
+- **Efficient Memory**: Train larger models with limited GPU memory
+
 ## Troubleshooting
 
 ### Issue: Low acceptance rate
 - **Solution**: Increase serial drafting steps, decrease num_draft_tokens, or train longer
 
-### Issue: High memory usage
+### Issue: High memory usage (Single GPU)
 - **Solution**: Reduce adapter_dim_ratio, use gradient checkpointing, or reduce batch size
+
+### Issue: High memory usage (Multi-GPU)
+- **Solution**: Enable ZeRO Stage 3, enable optimizer offloading, or reduce micro batch size per GPU
 
 ### Issue: Slow convergence
 - **Solution**: Increase learning rate, adjust loss weights, or use warmup schedule
+
+### Issue: DeepSpeed OOM errors
+- **Solution**: 
+  1. Reduce `train_micro_batch_size_per_gpu` in DeepSpeed config
+  2. Enable optimizer offloading: `"offload_optimizer": {"device": "cpu"}`
+  3. Use ZeRO Stage 3 instead of Stage 2
+  4. Enable activation checkpointing
+
+### Issue: Slow multi-GPU training
+- **Solution**:
+  1. Check GPU communication bandwidth
+  2. Increase `train_micro_batch_size_per_gpu` if memory allows
+  3. Disable `offload_optimizer` if CPU is bottleneck
+  4. Use faster interconnect (NVLink, InfiniBand)
 
 ## Citation
 
