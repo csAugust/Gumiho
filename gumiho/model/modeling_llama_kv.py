@@ -664,17 +664,22 @@ class LlamaDecoderLayer(nn.Module):
         mlp (LlamaMLP): Multi-layer perceptron module.
         input_layernorm (LlamaRMSNorm): Layer normalization for input.
         post_attention_layernorm (LlamaRMSNorm): Layer normalization after self-attention.
+        adapter (Optional[Adapter]): Optional adapter module for SpAF architecture.
     """
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.layer_idx = layer_idx
         self.self_attn = LlamaAttention(config=config)
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        
+        # [MODIFIED] SpAF: Optional adapter module
+        self.adapter = None
 
     def forward(
             self,
@@ -684,6 +689,8 @@ class LlamaDecoderLayer(nn.Module):
             past_key_value: Optional[Tuple[torch.Tensor]] = None,
             output_attentions: Optional[bool] = False,
             use_cache: Optional[bool] = False,
+            use_adapter: Optional[bool] = False,
+            output_adapter_logits: Optional[bool] = False,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
@@ -699,6 +706,8 @@ class LlamaDecoderLayer(nn.Module):
             output_attentions (bool, optional): Whether or not to return the attentions tensors of all attention layers.
             use_cache (bool, optional): If set to `True`, `past_key_values` key-value states are returned and can be
                 used to speed up decoding.
+            use_adapter (bool, optional): [SpAF] Whether to use the adapter for prediction.
+            output_adapter_logits (bool, optional): [SpAF] Whether to output adapter logits.
 
         Returns:
             Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]: Tuple containing:
@@ -707,6 +716,7 @@ class LlamaDecoderLayer(nn.Module):
                   `output_attentions` is `True`.
                 - present_key_value (Optional[Tuple[torch.FloatTensor]]): Cached key and value projection states if
                   `use_cache` is `True`.
+                - adapter_logits (Optional[torch.FloatTensor]): Adapter logits if `output_adapter_logits` is `True`.
         """
 
         residual = hidden_states
@@ -737,6 +747,11 @@ class LlamaDecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
+        
+        # [MODIFIED] SpAF: Apply adapter if requested
+        if output_adapter_logits and self.adapter is not None:
+            adapter_logits = self.adapter(hidden_states)
+            outputs += (adapter_logits,)
 
         return outputs
 
