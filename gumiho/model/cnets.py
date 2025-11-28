@@ -539,7 +539,7 @@ class ParallelMLPs(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, config, load_emb=False, path=None, bias=True, total_tokens=63, depth=5, top_k=10, threshold=1.0, args=None):
+    def __init__(self, config, load_emb=False, path=None, bias=True, total_tokens=63, depth=5, top_k=10, threshold=1.0, args=None, tokenizer=None):
         super().__init__()
 
         self.gradient_checkpointing = True
@@ -588,6 +588,8 @@ class Model(nn.Module):
         for param in self.embed_tokens.parameters():
             param.requires_grad = False
         self.lenth_norm = None
+
+        self.tokenizer = tokenizer
 
     def init_tree(self):
         self.tree_mask_init = torch.eye(self.args.top_k, device=self.embed_tokens.weight.device)[None, None]
@@ -729,7 +731,7 @@ class Model(nn.Module):
             
             mlp_inputs = torch.cat(mlp_inputs, dim=-1)  # (bs, sl, 2*hidden_dim)
             for i in range(self.mlp_num):
-                ret_hidden_states.append(self.mlp[i](mlp_inputs))
+                ret_hidden_states.append(self.mlp.mlp[i](mlp_inputs))
 
         ret_hidden_states.append(hidden_states)
 

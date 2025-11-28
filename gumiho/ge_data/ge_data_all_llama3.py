@@ -1,21 +1,22 @@
 import argparse
-
-
-parser = argparse.ArgumentParser(description='sp')
-parser.add_argument('--start', type=int, default=0)
-parser.add_argument('--end', type=int, default=100)
-parser.add_argument('--index', type=int, default=1)
-parser.add_argument('--gpu_index', type=int, nargs='+', default=[0])
-parser.add_argument('--outdir', type=str, default='outdir0')
-args = parser.parse_args()
 import os
-
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
+parser = argparse.ArgumentParser(description='Generate training data for LLaMA3')
+parser.add_argument('--start', type=int, default=0, help='Start index for data range')
+parser.add_argument('--end', type=int, default=100, help='End index for data range')
+parser.add_argument('--index', type=int, default=1, help='Process index')
+parser.add_argument('--gpu_index', type=int, nargs='+', default=[0], help='GPU indices to use')
+parser.add_argument('--outdir', type=str, default='outdir0', help='Output directory')
+parser.add_argument('--model_path', type=str, default='/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct', help='Path to the model')
+parser.add_argument('--dataset_path', type=str, default='/mnt/user-ssd/chenzhiyang1/workspace/Datasets/ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_unfiltered_cleaned_split.json', help='Path to the dataset')
+parser.add_argument('--max_length', type=int, default=2048, help='Maximum sequence length')
+parser.add_argument('--system_prompt', type=str, default='You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\'t know the answer to a question, please don\'t share false information.', help='System prompt for the model')
+args = parser.parse_args()
 
-bigname = "meta-llama/Meta-Llama-3-70B-Instruct"
+bigname = args.model_path
 
 
 
@@ -37,7 +38,7 @@ def build_dataset_rank(
         tokenizer, split="train",
         select=None,
 ):
-    ds = load_dataset('json', data_files="sharegpt_path")
+    ds = load_dataset('json', data_files=args.dataset_path)
     ds = ds['train']
     ds = ds.shuffle(seed=42)
     ds1 = ds.select(range(args.start, args.end))
@@ -52,8 +53,7 @@ def build_dataset_rank(
         }
         for i in range(len(examples['id'])):
             messages = [
-                {"role": "system",
-                 "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+                {"role": "system", "content": args.system_prompt},
             ]
             convroles=["user","assistant"]
             roles = {"human": "user", "gpt": "assistant"}
@@ -81,7 +81,7 @@ def build_dataset_rank(
             input_ids = tokenizer(
                 conversation,
                 return_tensors="pt",
-                max_length=2048,
+                max_length=args.max_length,
                 add_special_tokens=False,
             ).input_ids[0]
             loss_mask=torch.ones_like(input_ids)
@@ -183,5 +183,3 @@ for id,data in enumerate(ds):
         print("")
     outdata = ge(data)
     writedata(outdir,outdata)
-
-

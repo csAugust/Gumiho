@@ -71,13 +71,13 @@ class GumihoModel(nn.Module):
             self.gumiho_layer.diff_device = False
 
 
-        gumiho_layer_state_dict_new = {}
-        for k,v in gumiho_layer_state_dict.items():
-            new_key = k
-            if k.startswith("mlp."):
-                new_key = k.replace("mlp.", "mlp.mlp.")
-            gumiho_layer_state_dict_new[new_key] = v
-        gumiho_layer_state_dict = gumiho_layer_state_dict_new
+        # gumiho_layer_state_dict_new = {}
+        # for k,v in gumiho_layer_state_dict.items():
+        #     new_key = k
+        #     if k.startswith("mlp."):
+        #         new_key = k.replace("mlp.", "mlp.mlp.")
+        #     gumiho_layer_state_dict_new[new_key] = v
+        # gumiho_layer_state_dict = gumiho_layer_state_dict_new
 
         self.gumiho_layer.load_state_dict(gumiho_layer_state_dict, strict=True)
 
@@ -132,7 +132,7 @@ class GumihoModel(nn.Module):
         elif args.model_name == "l2_13b":
             configpath="./gumiho/train/llama_2_chat_13B_config.json"
         elif args.model_name == "l3_8b":
-            configpath="./gumiho/train/Gumiho-LLaMA3-Instruct-8B.json"
+            configpath="/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/Gumiho-LLaMA3-Instruct-8B.json"
         else:
             raise ValueError
      

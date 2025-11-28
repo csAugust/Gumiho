@@ -3,6 +3,7 @@
 import argparse
 import deepspeed
 from loguru import logger
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 parser = argparse.ArgumentParser(description='sp')
 parser.add_argument('--basepath', type=str, default='target_model_path ')
@@ -32,6 +33,7 @@ parser.add_argument('--start_epoch', type=int, default=0)
 parser.add_argument('--existing_model_path', type=str)
 parser.add_argument('--topk_loss_num', type=int, default=0)
 parser.add_argument('--mlp_loss_decay_coefficient', type=float, default=0.8)
+parser.add_argument('--serial_head_num', type=int, default=2)
 
 
 
@@ -76,8 +78,8 @@ set_seed(0)
 import sys
 sys.path.append('./gumiho')
 
-from model.cnets import Model
-from model.configs import EConfig
+from gumiho.model.cnets import Model
+from gumiho.model.configs import EConfig
 from typing import Any, Dict, List
 
 from torch import nn, optim
@@ -90,8 +92,9 @@ deepspeed.init_distributed()
 rank = torch.distributed.get_rank()
 
 if rank == 0:
-    import wandb
-    wandb.init(project="wandb_proj", name=args.logger_file, config=train_config)
+    from torch.utils.tensorboard import SummaryWriter
+    log_dir = os.getenv('TENSORBOARD_LOG_PATH') 
+    writer = SummaryWriter(log_dir=log_dir) 
     logger.add(f"./{args.model_name}/{args.logger_file}.log", level="DEBUG", mode="w")
     logger.info(f"{train_config = }")
     logger.info(f"{args = }")
@@ -262,7 +265,7 @@ def compute_loss(target, target_p, predict, loss_mask, topk_loss_num=0, args=Non
 
     for idx, predict_i in enumerate(predict_mlp):
         hidden_state_shifted = predict_i[:,:-(2+idx)].contiguous()
-        target_shifted = target[:, (2+idx):].contiguous()
+        target_shifted = target[:, (2+idx):].contiguous() # 预测下 2 + idx 个位置，向左偏移 2 + idx 个位置
         target_p_shifted = target_p[:, (2+idx):].contiguous()
         _loss_mask = loss_mask[:, (2+idx):].contiguous()
 
@@ -355,7 +358,8 @@ if rank == 0:
         os.makedirs(args.cpdir)
 
 config = EConfig.from_pretrained(args.configpath)
-model = Model(config, path=args.basepath, load_emb=True, args=args)
+tokenizer = AutoTokenizer.from_pretrained("/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct")
+model = Model(config, path=args.basepath, load_emb=True, args=args, tokenizer=tokenizer)
 
 
 if args.start_epoch > 0 or args.existing_model_path is not None:
@@ -427,7 +431,7 @@ for epoch in range(args.start_epoch, num_epochs):
         with torch.no_grad():
             target_head = head_engine(data["target"].to(rank).half())
             target_p = nn.Softmax(dim=2)(target_head)
-            target_p = target_p.detach()
+            target_p = target_p.detach() # target LLM 的预测 logits
 
         loss_mask = data["loss_mask"][:, :, None].to(rank)
         vloss, ploss, vloss_mlp, ploss_mlp, out_head, mlp_metric = compute_loss(data["target"], target_p, predict, loss_mask, args.topk_loss_num, args)
@@ -454,11 +458,15 @@ for epoch in range(args.start_epoch, num_epochs):
             correct += cc
         if rank == 0 and ct != 0:
             logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
-                       "train/ploss": ploss.item(), "train/mlp_ploss": ploss_mlp.item(), "train/mlp_vloss": vloss_mlp.item(), "train/loss": loss.item(), "train/acc": cc / ct, 
+                       "train/ploss": ploss.item(), "train/mlp_ploss": ploss_mlp.item(), "train/mlp_vloss": vloss_mlp.item(), "train/loss": loss.item(), "train/acc": cc / ct,
                        "avg_acc":  correct / (total + 1e-5)}
             
-            wandb.log(logdict)
-            wandb.log(mlp_metric)
+            # Log to TensorBoard
+            for key, value in logdict.items():
+                writer.add_scalar(key, value, epoch * len(train_loader) + batch_idx)
+            for key, value in mlp_metric.items():
+                writer.add_scalar(key, value, epoch * len(train_loader) + batch_idx)
+            
             logger.info(f"Epoch{epoch} Batch{batch_idx}: {logdict}")
             logger.info(f"Epoch{epoch} Batch{batch_idx}: {mlp_metric}")
             
@@ -475,7 +483,10 @@ for epoch in range(args.start_epoch, num_epochs):
         logger.info('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
         logger.info(f"{epoch=}, {correct=}, {total=}")
         logger.info('Train Accuracy: {:.2f}%'.format(100 * correct / (total + 1e-5)))
-        wandb.log({"train/epochacc": correct / (total + 1e-5), "train/epochloss": epoch_loss, "epoch": epoch})
+        # Log epoch metrics to TensorBoard
+        writer.add_scalar("train/epochacc", correct / (total + 1e-5), epoch)
+        writer.add_scalar("train/epochloss", epoch_loss, epoch)
+        writer.add_scalar("epoch", epoch, epoch)
         
     if args.run_mode == "train":
         model_engine.save_16bit_model(f"{args.cpdir}/state_{epoch}")
