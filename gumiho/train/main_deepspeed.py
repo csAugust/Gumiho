@@ -4,61 +4,62 @@ import argparse
 import deepspeed
 from loguru import logger
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import json
+import os
+
+# Import config loader
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from gumiho.train.config_loader import ConfigLoader
 
 parser = argparse.ArgumentParser(description='sp')
-parser.add_argument('--basepath', type=str, default='target_model_path ')
-parser.add_argument('--tmpdir', type=str,
-                    default='pre_generated_data ')
-parser.add_argument('--cpdir', type=str, default='path_to_save_the_ckpt')
+parser.add_argument('--config_path', type=str, default='scripts/train_config.json',
+                    help='Path to the training configuration file')
 parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
-
-parser.add_argument('--run_mode', type=str, default='train')  # "train" "debug"
-parser.add_argument('--logger_file', type=str, default='default')
-parser.add_argument('--resume_from', type=int, default=0)
-parser.add_argument('--dropout_rate', type=float, default=0)
-parser.add_argument('--mlp_num', type=int, default=5)
-parser.add_argument('--test_freq', type=int, default=100)
-parser.add_argument('--train_mlp_input', type=str, default='decoder_output')  # "ground_truth" "decoder_output"
-parser.add_argument('--mlp_loss_weight', type=float, default=9)
-parser.add_argument('--only_accept_max_each_epoch', type=int, default=0)
-parser.add_argument('--configpath', type=str, default="0")
-parser.add_argument('--model_name', type=str, default="l3_8b")
-parser.add_argument('--data_noise', type=int, default=1)
-parser.add_argument('--p_w', type=float, default=0.1)
-parser.add_argument('--v_w', type=float, default=1.0)
-parser.add_argument('--mlp_v_w', type=float, default=1.0)
-parser.add_argument('--mlp_p_w', type=float, default=0.1)
-parser.add_argument('--max_len', type=int, default=2048)
-parser.add_argument('--start_epoch', type=int, default=0)
-parser.add_argument('--existing_model_path', type=str)
-parser.add_argument('--topk_loss_num', type=int, default=0)
-parser.add_argument('--mlp_loss_decay_coefficient', type=float, default=0.8)
-parser.add_argument('--serial_head_num', type=int, default=2)
-
-
-
+parser.add_argument('--existing_model_path', type=str, help='Path to existing model checkpoint to resume from')
 
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
 
+# Load configuration from the specified config file
+config_loader = ConfigLoader(args.config_path)
+training_config = config_loader.get_training_config()
+model_config = config_loader.get_model_config()
+loss_weights_config = config_loader.get_loss_weights()
+data_config = config_loader.get_data_config()
+logging_config = config_loader.get_logging_config()
+paths_config = config_loader.get_paths()
+optimizer_config = config_loader.get_optimizer_config()
+
+# Dynamically add all configuration parameters to args
+for category, config_dict in [
+    ('training', training_config),
+    ('model', model_config),
+    ('loss_weights', loss_weights_config),
+    ('data', data_config),
+    ('logging', logging_config),
+    ('paths', paths_config),
+    ('optimizer', optimizer_config)
+]:
+    for key, value in config_dict.items():
+        setattr(args, key, value)
+
 logger.info(f"{args=}")
 logger.remove()
 
-import json
-
 train_config = {
-    "datapath": f"{args.tmpdir}",
+    "datapath": f"{args.data_dir}",
     "is_warmup": True,
-    "num_epochs": 200,
+    "num_epochs": args.num_epochs,
     "p_w": args.p_w,
     "v_w": args.v_w,
-    "num_workers": 2,
+    "num_workers": args.num_workers,
     "embeding": True,
     "act": "No",
     "data_noise": True,
-    "noise": "uniform",
-    "mean": 0.0,
-    "std": 0.2,
+    "noise": args.noise_type,
+    "mean": args.noise_mean,
+    "std": args.noise_std,
     "residual": "true,norm",
     "max_len": args.max_len,
 }
@@ -354,8 +355,8 @@ test_loader = DataLoader(testdataset, batch_size=4, shuffle=False,
 
 
 if rank == 0:
-    if not os.path.exists(args.cpdir):
-        os.makedirs(args.cpdir)
+    if not os.path.exists(args.ckpt_dir):
+        os.makedirs(args.ckpt_dir)
 
 config = EConfig.from_pretrained(args.configpath)
 tokenizer = AutoTokenizer.from_pretrained("/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct")
@@ -488,6 +489,5 @@ for epoch in range(args.start_epoch, num_epochs):
         writer.add_scalar("train/epochloss", epoch_loss, epoch)
         writer.add_scalar("epoch", epoch, epoch)
         
-    if args.run_mode == "train":
-        model_engine.save_16bit_model(f"{args.cpdir}/state_{epoch}")
-    
+    if args.run_mode == "train" and (epoch % args.save_interval == 0 or epoch == num_epochs - 1):
+        model_engine.save_16bit_model(f"{args.ckpt_dir}/state_{epoch}")

@@ -1,0 +1,65 @@
+{
+  "training": {
+    "num_epochs": 200,
+    "max_len": 2048,
+    "test_freq": 100,
+    "start_epoch": 0,
+    "run_mode": "train",
+    "data_noise": 1,
+    "noise_type": "uniform",
+    "noise_mean": 0.0,
+    "noise_std": 0.2,
+    "save_interval": 20
+  },
+  "model": {
+    "model_name": "l3_8b",
+    "dropout_rate": 0.0,
+    "mlp_num": 5,
+    "train_mlp_input": "decoder_output",
+    "serial_head_num": 2
+  },
+  "loss_weights": {
+    "p_w": 0.1,
+    "v_w": 1.0,
+    "mlp_v_w": 1.0,
+    "mlp_p_w": 0.1,
+    "mlp_loss_weight": 9.0,
+    "mlp_loss_decay_coefficient": 0.8,
+    "topk_loss_num": 0
+  },
+  "data": {
+    "train_split_ratio": 0.95,
+    "test_split_ratio": 0.05,
+    "num_workers": 2,
+    "batch_size": 4
+  },
+  "logging": {
+    "logger_file": "logs"
+  },
+  "paths": {
+    "data_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data",
+    "ckpt_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/ckpts/l3_8b/",
+    "configpath": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/Gumiho-LLaMA3-Instruct-8B.json",
+    "basepath": "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct",
+    "tokenizer_path": "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct"
+  },
+  "optimizer": {
+    "learning_rate": 1e-4,
+    "weight_decay": 0.01,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "grad_clip": 0.5
+  },
+  "spaf_training": {
+    "num_epochs": 3,
+    "max_seq_length": 512,
+    "batch_size": 8,
+    "adapter_dim_ratio": 0.25,
+    "alignment_weight": 1.0,
+    "adapter_weight": 1.0,
+    "alignment_loss_type": "mse",
+    "logging_steps": 100,
+    "save_steps": 1000,
+    "eval_steps": 500
+  }
+}

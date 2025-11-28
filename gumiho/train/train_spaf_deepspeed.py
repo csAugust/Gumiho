@@ -17,6 +17,16 @@ from typing import Dict, List
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+# Import config loader
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from gumiho.train.config_loader import ConfigLoader
+
+# Load configuration
+config_loader = ConfigLoader()
+spaf_training_config = config_loader.get_spaf_training_config()
+paths_config = config_loader.get_paths()
+
 # Parse arguments
 parser = argparse.ArgumentParser(description='SpAF Training with DeepSpeed')
 
@@ -34,23 +44,23 @@ parser.add_argument('--train_data_path', type=str, required=True,
                     help='Path to training data')
 parser.add_argument('--eval_data_path', type=str, default=None,
                     help='Path to evaluation data')
-parser.add_argument('--num_epochs', type=int, default=3,
+parser.add_argument('--num_epochs', type=int, default=spaf_training_config.get('num_epochs', 3),
                     help='Number of training epochs')
-parser.add_argument('--max_seq_length', type=int, default=512,
+parser.add_argument('--max_seq_length', type=int, default=spaf_training_config.get('max_seq_length', 512),
                     help='Maximum sequence length')
-parser.add_argument('--batch_size', type=int, default=8,
+parser.add_argument('--batch_size', type=int, default=spaf_training_config.get('batch_size', 8),
                     help='Training batch size per GPU')
 
 # SpAF parameters
 parser.add_argument('--cutoff_layer', type=int, default=None,
                     help='Cutoff layer for SpAF (default: num_layers // 2)')
-parser.add_argument('--adapter_dim_ratio', type=float, default=0.25,
+parser.add_argument('--adapter_dim_ratio', type=float, default=spaf_training_config.get('adapter_dim_ratio', 0.25),
                     help='Adapter dimension ratio')
-parser.add_argument('--alignment_weight', type=float, default=1.0,
+parser.add_argument('--alignment_weight', type=float, default=spaf_training_config.get('alignment_weight', 1.0),
                     help='Weight for alignment loss')
-parser.add_argument('--adapter_weight', type=float, default=1.0,
+parser.add_argument('--adapter_weight', type=float, default=spaf_training_config.get('adapter_weight', 1.0),
                     help='Weight for adapter loss')
-parser.add_argument('--alignment_loss_type', type=str, default='mse',
+parser.add_argument('--alignment_loss_type', type=str, default=spaf_training_config.get('alignment_loss_type', 'mse'),
                     choices=['mse', 'cosine'],
                     help='Type of alignment loss')
 
@@ -61,11 +71,11 @@ parser.add_argument('--weight_decay', type=float, default=0.01,
                     help='Weight decay')
 
 # Logging and checkpointing
-parser.add_argument('--logging_steps', type=int, default=100,
+parser.add_argument('--logging_steps', type=int, default=spaf_training_config.get('logging_steps', 100),
                     help='Log every N steps')
-parser.add_argument('--save_steps', type=int, default=1000,
+parser.add_argument('--save_steps', type=int, default=spaf_training_config.get('save_steps', 1000),
                     help='Save checkpoint every N steps')
-parser.add_argument('--eval_steps', type=int, default=500,
+parser.add_argument('--eval_steps', type=int, default=spaf_training_config.get('eval_steps', 500),
                     help='Evaluate every N steps')
 parser.add_argument('--resume_from_checkpoint', type=str, default=None,
                     help='Path to checkpoint to resume from')
