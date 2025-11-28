@@ -1,0 +1,196 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Eval (Single GPU)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "gumiho.evaluation.gen_gumiho_answer_llama3chat",
+            "args": [
+                "--config_path",
+                "${workspaceFolder}/scripts/eval_config.json"
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "TOKENIZERS_PARALLELISM": "false"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        },
+        {
+            "name": "Debug Eval (Fast Test)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "gumiho.evaluation.gen_gumiho_answer_llama3chat",
+            "args": [
+                "--config_path",
+                "${workspaceFolder}/scripts/eval_config.json"
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "TOKENIZERS_PARALLELISM": "false"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        },
+        {
+            "name": "Debug Eval (Distributed)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "gumiho.evaluation.gen_gumiho_answer_llama3chat",
+            "args": [
+                "--config_path",
+                "${workspaceFolder}/scripts/eval_config.json"
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+                "TOKENIZERS_PARALLELISM": "false",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "4",
+                "RANK": "0"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        },
+        {
+            "name": "Debug Train (Single GPU)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/gumiho/train/main_deepspeed.py",
+            "args": [
+                "--deepspeed",
+                "--deepspeed_config",
+                "ds_config_debug.json",
+                "--tmpdir",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data",
+                "--cpdir",
+                "./ckpts-debug",
+                "--configpath",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/Gumiho-LLaMA3-Instruct-8B.json",
+                "--basepath",
+                "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct",
+                "--logger_file",
+                "debug_wandb",
+                "--p_w",
+                "0.1",
+                "--mlp_v_w",
+                "1.0",
+                "--mlp_p_w",
+                "100",
+                "--max_len",
+                "512",
+                "--model_name",
+                "l3_8b_debug",
+                "--start_epoch",
+                "0",
+                "--run_mode",
+                "debug"
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "TOKENIZERS_PARALLELISM": "false",
+                "WANDB_MODE": "disabled"
+            },
+            "cwd": "${workspaceFolder}/gumiho/train",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        },
+        {
+            "name": "Debug Train (Full Config)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/gumiho/train/main_deepspeed.py",
+            "args": [
+                "--deepspeed",
+                "--deepspeed_config",
+                "ds_config.json",
+                "--tmpdir",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data",
+                "--cpdir",
+                "./ckpts-cloudml",
+                "--configpath",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/Gumiho-LLaMA3-Instruct-8B.json",
+                "--basepath",
+                "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct",
+                "--logger_file",
+                "wandb",
+                "--p_w",
+                "0.1",
+                "--mlp_v_w",
+                "1.0",
+                "--mlp_p_w",
+                "100",
+                "--max_len",
+                "2048",
+                "--model_name",
+                "l3_8b",
+                "--start_epoch",
+                "0"
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+            "cwd": "${workspaceFolder}/gumiho/train",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        },
+        {
+            "name": "Debug Train (Fast Test)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/gumiho/train/main_deepspeed.py",
+            "args": [
+                "--deepspeed",
+                "--deepspeed_config",
+                "ds_config_debug.json",
+                "--tmpdir",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data",
+                "--cpdir",
+                "./ckpts-debug",
+                "--configpath",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/Gumiho-LLaMA3-Instruct-8B.json",
+                "--basepath",
+                "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct",
+                "--logger_file",
+                "debug_test",
+                "--p_w",
+                "0.1",
+                "--mlp_v_w",
+                "1.0",
+                "--mlp_p_w",
+                "100",
+                "--max_len",
+                "256",
+                "--model_name",
+                "l3_8b_test",
+                "--start_epoch",
+                "0",
+                "--run_mode",
+                "debug"
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "TOKENIZERS_PARALLELISM": "false",
+                "WANDB_MODE": "disabled"
+            },
+            "cwd": "${workspaceFolder}/gumiho/train",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        }
+    ]
+}

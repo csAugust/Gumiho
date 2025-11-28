@@ -3,19 +3,23 @@
 """Generate answers with local models.
 
 Usage:
-python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fastchat-t5-3b-v1.0
+python3 gen_model_answer.py --config_path scripts/eval_config.json
 """
 import argparse
 import json
 import os
+import sys
 script_dir = os.path.dirname(__file__)
 parent_dir = os.path.dirname(script_dir)
-#os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+grandparent_dir = os.path.dirname(parent_dir)
+sys.path.append(grandparent_dir)
+
+from gumiho.evaluation.eval_config_loader import EvalConfigLoader
 from accelerate.utils import set_seed
 set_seed(0)
 
 import time
-
+from datetime import datetime, timedelta
 import shortuuid
 from fastchat.llm_judge.common import load_questions
 from tqdm import tqdm
@@ -26,56 +30,57 @@ from ..model.utils import *
 
 from loguru import logger
 logger.remove()
-# import ray
-# ray.init(ignore_reinit_error=True)
 
-def run_eval(
-        base_model_path,
-        gumiho_model_path,
-        model_id,
-        question_file,
-        question_begin,
-        question_end,
-        max_new_token,
-        num_choices,
-        num_gpus_per_model,
-        num_gpus_total,
-        max_gpu_memory,
-        temperature,
-        args
-):
-    questions = load_questions(question_file, question_begin, question_end)
+# Initialize distributed training if needed
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch
+
+def run_eval(args):
+    """Run evaluation with configuration from args"""
+    question_file = f"{parent_dir}/data/{args.bench_name}/question.jsonl"
+    questions = load_questions(question_file, args.question_begin, args.question_end)
+    
     # random shuffle the questions to balance the loading
     # random.shuffle(questions)
-    shuffled_ids = [q["question_id"] for q in questions]
-    # with open(f"data/{args.bench_name}/model_ids/{args.model_id}.shuffled_ids", "w") as fout:
-    #     json.dump(shuffled_ids, fout)
+    # shuffled_ids = [q["question_id"] for q in questions]
 
     # Split the question file into `num_gpus` files
-    assert num_gpus_total % num_gpus_per_model == 0
-    use_ray = num_gpus_total // num_gpus_per_model > 1
+    assert args.num_gpus_total % args.num_gpus_per_model == 0
+    use_ray = args.num_gpus_total // args.num_gpus_per_model > 1
 
     if use_ray:
-        get_answers_func = ray.remote(num_gpus=num_gpus_per_model)(
+        get_answers_func = ray.remote(num_gpus=args.num_gpus_per_model)(
             get_model_answers
         ).remote
     else:
         get_answers_func = get_model_answers
 
-    chunk_size = len(questions) // (num_gpus_total // num_gpus_per_model)  # // 2
+    chunk_size = len(questions) // (args.num_gpus_total // args.num_gpus_per_model)  # // 2
     ans_handles = []
+
+
+    model = GumihoModel.from_pretrained(
+        base_model_path=args.base_model_path,
+        gumiho_model_path=args.gumiho_model_path,
+        total_token=args.total_tokens,
+        depth=args.depth,
+        top_k=args.top_k,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        device_map="auto",
+        args=args
+    )
     for i in range(0, len(questions), chunk_size):
         ans_handles.append(
             get_answers_func(
-                base_model_path,
-                gumiho_model_path,
-                model_id,
+                model,
                 questions[i: i + chunk_size],
-                max_new_token,
-                num_choices,
-                num_gpus_per_model,
-                max_gpu_memory,
-                temperature,
+                args.max_new_token,
+                args.num_choices,
+                args.num_gpus_per_model,
+                args.max_gpu_memory,
+                args.temperature,
                 args
             )
         )
@@ -86,12 +91,9 @@ def run_eval(
         return sum(results) / len(results)
 
 
-
 @torch.inference_mode()
 def get_model_answers(
-        base_model_path,
-        gumiho_model_path,
-        model_id,
+        model,
         questions,
         max_new_token,
         num_choices,
@@ -100,19 +102,6 @@ def get_model_answers(
         temperature,
         args
 ):
-    # temperature = 0.0
-
-    model = GumihoModel.from_pretrained(
-        base_model_path=base_model_path,
-        gumiho_model_path=gumiho_model_path,
-        total_token=args.total_tokens,
-        depth=args.depth,
-        top_k=args.top_k,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        device_map="auto",
-        args=args
-    )
 
     tokenizer = model.get_tokenizer()
 
@@ -196,8 +185,6 @@ def get_model_answers(
                 else:
                     output = output.replace(special_token, "")
             output = output.strip()
-
-
 
             turns.append(output)
             idxs.append(int(idx))
@@ -314,144 +301,111 @@ def get_model_answers(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--gumiho-model-path",
-        type=str,
-        default="down_checkpoints/LC70B",
-        help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
-    )
-    parser.add_argument("--base-model-path", type=str, default="/home/lyh/weights/hf/llama2chat/70B/",
-                        help="1")
-    parser.add_argument(
-        "--load-in-8bit", action="store_false", help="Use 8-bit quantization"
-    )
-    parser.add_argument("--model-id", type=str, default="default")
-    parser.add_argument(
-        "--bench-name",
-        type=str,
-        default="mt_bench",
-        help="The name of the benchmark question set.",
-    )
-    parser.add_argument(
-        "--question-begin",
-        type=int,
-        help="A debug option. The begin index of questions.",
-    )
-    parser.add_argument(
-        "--question-end", type=int, help="A debug option. The end index of questions."
-    )
-    parser.add_argument("--answer-file", type=str, help="The output answer file.")
-    parser.add_argument(
-        "--max-new-token",
-        type=int,
-        default=1024,
-        help="The maximum number of new generated tokens.",
-    )
-    parser.add_argument(
-        "--total-tokens",
-        type=int,
-        default=60,
-        help="The maximum number of new generated tokens.",
-    )
-    parser.add_argument(
-        "--depth",
-        type=int,
-        default=5,
-        help="The maximum number of new generated tokens.",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=10,
-        help="The maximum number of new generated tokens.",
-    )
-
-    parser.add_argument(
-        "--num-choices",
-        type=int,
-        default=1,
-        help="How many completion choices to generate.",
-    )
-    parser.add_argument(
-        "--num-gpus-per-model",
-        type=int,
-        default=1,
-        help="The number of GPUs per model.",
-    )
-    parser.add_argument(
-        "--num-gpus-total", type=int, default=1, help="The total number of GPUs."
-    )
-    parser.add_argument(
-        "--max-gpu-memory",
-        type=str,
-        help="Maxmum GPU memory used for model weights per GPU.",
-    )
-
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.0,
-    )
-
-    parser.add_argument(
-        "--tree-choices",
-        type=str,
-        default="mc_sim_7b_63",
-    )
-
-    parser.add_argument('--dropout_rate', type=float, default=0.1)
-    parser.add_argument('--mlp_num', type=int, default=5)
-    parser.add_argument('--serial_head_num', type=int, default=2)
-    parser.add_argument('--test_freq', type=int, default=1)
-    parser.add_argument('--train_mlp_input', type=str, default='ground_truth')  # "ground_truth" "decoder_output"
-    parser.add_argument('--mlp_loss_weight', type=float, default=1.0)
-    parser.add_argument('--only_accept_max_each_epoch', type=int, default=0)
-    parser.add_argument('--run_mode', type=str, default='eval')  # "train" "debug" "eval"
-    parser.add_argument('--logger_file', type=str, default='default')
-    parser.add_argument('--resume_from', type=int, default=0)
-    parser.add_argument('--mlptopk', type=int, default=20)
-    parser.add_argument('--pruning', type=int, default=5)
-    parser.add_argument('--complete_mask', type=int, default=0)
-    parser.add_argument('--model_name', type=str, default='l3_8b')
-
-
+    parser = argparse.ArgumentParser(description='Gumiho Evaluation')
+    parser.add_argument('--config_path', type=str, default='scripts/eval_config.json',
+                        help='Path to the evaluation configuration file')
+    parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+    
     args = parser.parse_args()
 
-    log_path = os.path.join("log", f"{args.model_name}")
+    # Load configuration from the specified config file
+    config_loader = EvalConfigLoader(args.config_path)
+    evaluation_config = config_loader.get_evaluation_config()
+    gumiho_params = config_loader.get_gumiho_params()
+    distributed_config = config_loader.get_distributed_config()
+    model_paths = config_loader.get_models_config()
+    logging_config = config_loader.get_logging_config()
+
+    # Dynamically add all configuration parameters to args
+    for category, config_dict in [
+        ('evaluation', evaluation_config),
+        ('gumiho_params', gumiho_params),
+        ('distributed', distributed_config),
+        ('logging', logging_config)
+    ]:
+        for key, value in config_dict.items():
+            setattr(args, key, value)
+    
+    # Handle model-specific paths
+    model_name = getattr(args, 'model_name', 'l3_8b')
+    if model_name in model_paths:
+        model_config = model_paths[model_name]
+        if 'gumiho_path' in model_config:
+            setattr(args, 'gumiho_model_path', model_config['gumiho_path'])
+        if 'base_model_path' in model_config:
+            setattr(args, 'base_model_path', model_config['base_model_path'])
+    
+    logger.info(f"{args=}")
+    logger.remove()
+
+    # Initialize distributed training if needed
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    rank = int(os.environ.get('RANK', 0))
+    
+    if world_size > 1:
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend='nccl', init_method='env://')
+        print(f"Initialized distributed training: rank={rank}, local_rank={local_rank}, world_size={world_size}")
+
+    log_path = os.path.join(f"{args.log_dir}", f"{args.model_name}", f"{args.bench_name}")
     os.makedirs(log_path, exist_ok=True)
-    logger.add(f"{log_path}/{args.logger_file}.log", level="DEBUG", mode="w", format="{message}")
-    print(f"---------> Output to {log_path}/{args.logger_file}.log")
+    
+    # Add rank to logger file for distributed training
+    # Get current time in GMT+8 (UTC+8)
+    gmt8_time = datetime.now() + timedelta(hours=8)
+    time_str = gmt8_time.strftime("%Y%m%d_%H%M%S")
+    
+    logger_file = f"{time_str}"
+    if world_size > 1:
+        logger_file = f"{logger_file}_rank{local_rank}"
+    
+    logger.add(f"{log_path}/{logger_file}.log", level="DEBUG", mode="w", format="{message}")
+    print(f"---------> Output to {log_path}/{logger_file}.log")
 
     args_dict = vars(args)
     logger.info("="*30)
+    logger.info(f"Distributed: rank={rank}, local_rank={local_rank}, world_size={world_size}")
     for key, value in args_dict.items():
         logger.info(f"{key}: {value}")
     logger.info("="*30)
 
-    args.model_id = args.model_id + "-temperature-" + str(args.temperature)
+    # Initialize Ray for multi-GPU if needed
     if args.num_gpus_total // args.num_gpus_per_model > 1:
         import ray
-
         ray.init()
 
-    question_file = f"{parent_dir}/data/{args.bench_name}/question.jsonl"
+    # For distributed training, each rank processes a subset of questions
+    if world_size > 1:
+        question_file = f"{parent_dir}/data/{args.bench_name}/question.jsonl"
+        questions = load_questions(question_file, args.question_begin, args.question_end)
+        chunk_size = len(questions) // world_size
+        start_idx = rank * chunk_size
+        end_idx = start_idx + chunk_size if rank < world_size - 1 else len(questions)
+        questions_subset = questions[start_idx:end_idx]
+        
+        logger.info(f"Rank {rank} processing {len(questions_subset)} questions ({start_idx} to {end_idx})")
+        
+        # Create a temporary question file for this rank
+        temp_question_file = f"{question_file}.rank{rank}"
+        with open(temp_question_file, 'w') as f:
+            for q in questions_subset:
+                f.write(json.dumps(q) + '\n')
+        
+        # Override question file and range for this rank
+        args.question_file = temp_question_file
+        args.question_begin = None
+        args.question_end = None
+
+    run_eval(args)
     
-
-
-    run_eval(
-        args.base_model_path,
-        args.gumiho_model_path,
-        args.model_id,
-        question_file,
-        args.question_begin,
-        args.question_end,
-        args.max_new_token,
-        args.num_choices,
-        args.num_gpus_per_model,
-        args.num_gpus_total,
-        args.max_gpu_memory,
-        args.temperature,
-        args
-    )
-
+    # Clean up temporary question file
+    if world_size > 1 and 'temp_question_file' in locals():
+        try:
+            os.remove(temp_question_file)
+        except:
+            pass
+    
+    # Clean up distributed training
+    if world_size > 1:
+        dist.destroy_process_group()

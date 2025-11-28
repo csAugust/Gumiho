@@ -1,0 +1,5 @@
+__pycache__
+train_data/*
+ckpts/*
+gumiho/train/ckpts-cloudml/*
+log/*

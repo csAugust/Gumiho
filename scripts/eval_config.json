@@ -1,0 +1,42 @@
+{
+  "evaluation": {
+    "model_name": "l3_8b",
+    "bench_name": "mt_bench",
+    "temperature": 0,
+    "max_new_token": 1024,
+    "num_choices": 1,
+    "question_begin": null,
+    "question_end": null
+  },
+  "gumiho_params": {
+    "mlptopk": 35,
+    "total_tokens": 64,
+    "depth": 6,
+    "mlp_num": 5,
+    "pruning": 35,
+    "top_k": 14,
+    "complete_mask": 1,
+    "serial_head_num": 2
+  },
+  "distributed": {
+    "num_gpus_per_model": 1,
+    "num_gpus_total": 1,
+    "num_nodes": 1,
+    "use_deepspeed": false,
+    "use_ray": false,
+    "max_gpu_memory": null
+  },
+  "models": {
+    "l3_8b": {
+      "gumiho_path": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/ckpts/state_199",
+      "base_model_path": "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct"
+    },
+    "l3_70b": {
+      "gumiho_path": "l3_70b_ckpt",
+      "base_model_path": "meta-llama/Meta-Llama-3-70B-Instruct"
+    }
+  },
+  "logging": {
+    "log_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/log"
+  }
+}

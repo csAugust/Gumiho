@@ -1,0 +1,27 @@
+{
+    "python.defaultInterpreterPath": "python",
+    "python.terminal.activateEnvironment": true,
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": false,
+    "python.linting.flake8Enabled": true,
+    "python.formatting.provider": "black",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/gumiho"
+    ],
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/ckpts*/**": true,
+        "**/train_data*/**": true,
+        "**/runs/**": true,
+        "**/wandb/**": true,
+        "**/*.log": true
+    },
+    "debug.console.acceptSuggestionOnEnter": "on",
+    "debug.console.fontSize": 12,
+    "debug.console.wordWrap": true,
+    "terminal.integrated.cwd": "${workspaceFolder}",
+    "python.terminal.executeInFileDir": false,
+    "python.envFile": "${workspaceFolder}/.env"
+}
