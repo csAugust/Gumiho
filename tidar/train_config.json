@@ -1,0 +1,22 @@
+{
+  "data_dir": "./train_data",
+  "ckpt_dir": "./tidar_checkpoints",
+  "qwen_model_path": "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct",
+  "model_name": "tidar-1.5B",
+  "logger_file": "training",
+  
+  "num_epochs": 3,
+  "start_epoch": 0,
+  "save_interval": 1,
+  "max_len": 512,
+  "num_workers": 4,
+  "run_mode": "train",
+  
+  "tidar_block_size": 8,
+  "tidar_clean_ratio": 0.5,
+  
+  "ar_loss_weight": 1.0,
+  "diffusion_loss_weight": 1.0,
+  
+  "deepspeed_config": "tidar/ds_config.json"
+}
