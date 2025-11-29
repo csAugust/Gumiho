@@ -1,13 +1,14 @@
 {
-  "data_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data/Qwen2.5-1.5B-Instruct/ShareGPT_V4.3_unfiltered_cleaned_split.json",
-  "ckpt_dir": "./tidar_checkpoints",
+  "data_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data/Qwen2.5-1.5B-Instruct/ShareGPT_V4.3_unfiltered_cleaned_split.json/0_20000_mufp16",
+  "ckpt_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints",
+  "existing_model_path": null,
   "qwen_model_path": "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct",
   "model_name": "tidar-1.5B",
   "logger_file": "training",
   
   "num_epochs": 200,
   "start_epoch": 0,
-  "save_interval": 1,
+  "save_interval": 20,
   "max_len": 4096,
   "num_workers": 4,
   "run_mode": "train",
@@ -18,5 +19,5 @@
   "ar_loss_weight": 0.1,
   "diffusion_loss_weight": 1.0,
   
-  "deepspeed_config": "tidar/ds_config.json"
+  "deepspeed_config": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/ds_config.json"
 }
