@@ -127,6 +127,7 @@ class CustomDataset(Dataset):
         
         # Load original sequence (limit to S tokens)
         original_input_ids = data['input_ids'][:self.max_len]
+        original_loss_mask = data['loss_mask'][:self.max_len]  # Load loss_mask
         seq_length = len(original_input_ids)  # S
         
         # 1. Construct input_ids: [clean_tokens, MASK_tokens] (2S length)
@@ -144,19 +145,30 @@ class CustomDataset(Dataset):
         diffusion_labels = original_input_ids  # [t1, t2, ..., tS]
         labels = torch.cat([ar_labels, diffusion_labels])  # Length 2S
         
-        # 3. Construct position_ids: [0..S-1, 0..S-1] (restarting for masked region)
+        # 3. Construct loss_mask: [AR_loss_mask, Diffusion_loss_mask] (2S length)
+        # AR loss_mask: shifted by 1 to match AR labels, last position is 0
+        ar_loss_mask = torch.cat([
+            original_loss_mask[1:],  # Shift mask to align with shifted labels
+            torch.tensor([0], dtype=torch.long)  # No loss for last position
+        ])
+        # Diffusion loss_mask: same as original (all positions contribute to diffusion loss)
+        diffusion_loss_mask = original_loss_mask  # [m1, m2, ..., mS]
+        loss_mask = torch.cat([ar_loss_mask, diffusion_loss_mask])  # Length 2S
+        
+        # 4. Construct position_ids: [0..S-1, 0..S-1] (restarting for masked region)
         position_ids = torch.cat([
             torch.arange(seq_length, dtype=torch.long),
             torch.arange(seq_length, dtype=torch.long)
         ])  # Length 2S
         
-        # 4. Attention mask will be created in collator (needs to be 2S x 2S)
+        # 5. Attention mask will be created in collator (needs to be 2S x 2S)
         # For now, just mark valid positions
         attention_mask = torch.ones(2 * seq_length, dtype=torch.long)
         
         return {
             "input_ids": input_ids,
             "labels": labels,
+            "loss_mask": loss_mask,
             "position_ids": position_ids,
             "attention_mask": attention_mask,
             "seq_length": seq_length,  # Store S for creating attention mask later
@@ -212,6 +224,7 @@ class DataCollatorWithPadding:
         
         batch_input_ids = []
         batch_labels = []
+        batch_loss_mask = []
         batch_position_ids = []
         batch_attention_mask = []
         batch_seq_lengths = []
@@ -234,6 +247,13 @@ class DataCollatorWithPadding:
                 torch.full((pad_length,), -100, dtype=torch.long)  # -100 is ignore index
             ])
             batch_labels.append(labels)
+            
+            # Pad loss_mask
+            loss_mask = torch.cat([
+                item['loss_mask'],
+                torch.zeros(pad_length, dtype=torch.long)  # Padded positions don't contribute to loss
+            ])
+            batch_loss_mask.append(loss_mask)
             
             # Pad position_ids
             position_ids = torch.cat([
@@ -258,18 +278,20 @@ class DataCollatorWithPadding:
         return {
             "input_ids": torch.stack(batch_input_ids),
             "labels": torch.stack(batch_labels),
+            "loss_mask": torch.stack(batch_loss_mask),
             "position_ids": torch.stack(batch_position_ids),
             "attention_mask": torch.stack(batch_attention_mask),
             "seq_lengths": torch.tensor(batch_seq_lengths),
         }
 
 
-def compute_tidar_loss(logits, labels, seq_lengths, args):
+def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
     """
     Compute TiDAR loss combining AR loss and diffusion loss.
     
     The input sequence is 2S tokens: [clean_tokens, MASK_tokens]
     The labels are 2S tokens: [AR_labels (shifted), Diffusion_labels (unshifted)]
+    The loss_mask indicates which positions to include in loss calculation (0=exclude, 1=include)
     
     - AR loss: Computed on first S positions (next-token prediction)
     - Diffusion loss: Computed on second S positions (denoising)
@@ -277,6 +299,7 @@ def compute_tidar_loss(logits, labels, seq_lengths, args):
     Args:
         logits: Model output logits [batch_size, 2S, vocab_size]
         labels: Ground truth tokens [batch_size, 2S]
+        loss_mask: Binary mask for loss calculation [batch_size, 2S]
         seq_lengths: Actual sequence length S for each sample [batch_size]
         args: Training arguments
     
@@ -300,10 +323,12 @@ def compute_tidar_loss(logits, labels, seq_lengths, args):
         # Predicting positions 1 to S-1 from positions 0 to S-2
         ar_logits = logits[i, :seq_len-1, :]  # [S-1, vocab_size]
         ar_labels = labels[i, 1:seq_len]  # [S-1] - shifted labels
+        ar_mask = loss_mask[i, 1:seq_len]  # [S-1] - shifted loss_mask
         
-        # Compute AR loss (ignore -100 labels)
+        # Compute AR loss
         ar_loss = loss_fct(ar_logits, ar_labels)
-        valid_ar = ar_labels != -100
+        # Apply both label validity check and loss_mask
+        valid_ar = (ar_labels != -100) & (ar_mask > 0)
         if valid_ar.sum() > 0:
             ar_loss_total += ar_loss[valid_ar].sum()
             ar_count += valid_ar.sum().item()
@@ -312,10 +337,12 @@ def compute_tidar_loss(logits, labels, seq_lengths, args):
         # Predicting all S positions in the masked region
         diff_logits = logits[i, seq_len:seq_len*2, :]  # [S, vocab_size]
         diff_labels = labels[i, seq_len:seq_len*2]  # [S] - original tokens
+        diff_mask = loss_mask[i, seq_len:seq_len*2]  # [S] - loss_mask for diffusion
         
-        # Compute Diffusion loss (ignore -100 labels)
+        # Compute Diffusion loss
         diff_loss = loss_fct(diff_logits, diff_labels)
-        valid_diff = diff_labels != -100
+        # Apply both label validity check and loss_mask
+        valid_diff = (diff_labels != -100) & (diff_mask > 0)
         if valid_diff.sum() > 0:
             diffusion_loss_total += diff_loss[valid_diff].sum()
             diffusion_count += valid_diff.sum().item()
@@ -328,10 +355,10 @@ def compute_tidar_loss(logits, labels, seq_lengths, args):
     total_loss = (args.ar_loss_weight * ar_loss + 
                   args.diffusion_loss_weight * diffusion_loss)
     
-    # Calculate accuracy
+    # Calculate accuracy (only on positions with loss_mask > 0)
     with torch.no_grad():
         predictions = torch.argmax(logits, dim=-1)
-        valid_labels = labels != -100
+        valid_labels = (labels != -100) & (loss_mask > 0)
         correct = (predictions == labels) & valid_labels
         accuracy = correct.sum().float() / (valid_labels.sum().float() + 1e-8)
     
@@ -439,6 +466,7 @@ for epoch in range(args.start_epoch, args.num_epochs):
         # Move batch to device
         input_ids = batch["input_ids"].to(rank)
         labels = batch["labels"].to(rank)
+        loss_mask = batch["loss_mask"].to(rank)
         position_ids = batch["position_ids"].to(rank)
         attention_mask = batch["attention_mask"].to(rank)
         seq_lengths = batch["seq_lengths"]
@@ -454,7 +482,7 @@ for epoch in range(args.start_epoch, args.num_epochs):
         
         # Compute loss
         total_loss, ar_loss, diffusion_loss, metrics = compute_tidar_loss(
-            logits, labels, seq_lengths, args
+            logits, labels, loss_mask, seq_lengths, args
         )
         
         # Backward pass
