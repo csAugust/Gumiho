@@ -271,207 +271,123 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         **kwargs
     ):
         """
-        Load TiDAR model from Qwen2.5 pretrained weights.
+        Load TiDAR model from either a TiDAR checkpoint or Qwen2.5 pretrained weights.
         
-        This method loads a Qwen2.5 model and converts it to TiDAR format
-        by creating a TiDAR configuration and loading the weights.
+        This method automatically detects the model type:
+        - If it's a TiDAR checkpoint (has TiDARQwen2Config), loads directly
+        - If it's a Qwen2.5 model, converts it to TiDAR format
         
         Args:
-            pretrained_model_name_or_path: Path to Qwen2.5 model or model identifier
-            block_size: Block size for block-wise bidirectional attention
-            clean_ratio: Ratio of clean tokens in the input sequence
-            use_tidar: Whether to enable TiDAR mode
-            **kwargs: Additional arguments for model loading
+            pretrained_model_name_or_path: Path to model checkpoint or model identifier
+            block_size: Block size for block-wise bidirectional attention (only used when converting from Qwen2.5)
+            clean_ratio: Ratio of clean tokens in the input sequence (only used when converting from Qwen2.5)
+            use_tidar: Whether to enable TiDAR mode (only used when converting from Qwen2.5)
+            **kwargs: Additional arguments passed to transformers.from_pretrained
             
         Returns:
-            TiDARQwen2ForCausalLM: Model initialized with Qwen2.5 weights
+            TiDARQwen2ForCausalLM: Model loaded from checkpoint
         """
         import os
-        from transformers import AutoConfig
+        from transformers import AutoConfig, AutoModelForCausalLM
         
-        print("=" * 80)
-        print("Loading Qwen2.5 model and converting to TiDAR")
-        print("=" * 80)
-        
-        # Load Qwen2.5 configuration
-        print(f"\n1. Loading Qwen2.5 configuration from: {pretrained_model_name_or_path}")
-        qwen_config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
-        
-        print(f"  - vocab_size: {qwen_config.vocab_size}")
-        print(f"  - hidden_size: {qwen_config.hidden_size}")
-        print(f"  - num_hidden_layers: {qwen_config.num_hidden_layers}")
-        print(f"  - num_attention_heads: {qwen_config.num_attention_heads}")
-        print(f"  - num_key_value_heads: {qwen_config.num_key_value_heads}")
-        print(f"  - intermediate_size: {qwen_config.intermediate_size}")
-        print(f"  - max_position_embeddings: {qwen_config.max_position_embeddings}")
-        
-        # Create TiDAR configuration based on Qwen2.5 config
-        print(f"\n2. Creating TiDAR configuration:")
-        print(f"  - block_size: {block_size}")
-        print(f"  - clean_ratio: {clean_ratio}")
-        print(f"  - use_tidar: {use_tidar}")
-        
-        tidar_config = TiDARQwen2Config(
-            vocab_size=qwen_config.vocab_size,
-            hidden_size=qwen_config.hidden_size,
-            num_hidden_layers=qwen_config.num_hidden_layers,
-            num_attention_heads=qwen_config.num_attention_heads,
-            num_key_value_heads=qwen_config.num_key_value_heads,
-            intermediate_size=qwen_config.intermediate_size,
-            max_position_embeddings=qwen_config.max_position_embeddings,
-            rms_norm_eps=getattr(qwen_config, 'rms_norm_eps', 1e-6),
-            hidden_act=getattr(qwen_config, 'hidden_act', 'silu'),
-            block_size=block_size,
-            use_tidar=use_tidar,
-            clean_ratio=clean_ratio,
-        )
-        
-        print(f"✓ TiDAR configuration created")
-        
-        # Create TiDAR model
-        print(f"\n3. Creating TiDAR model:")
-        model = cls(tidar_config)
-        print(f"✓ TiDAR model created")
-        print(f"  - Model type: {type(model).__name__}")
-        
-        # Load weights from Qwen2.5 model
-        print(f"\n4. Loading weights from Qwen2.5 model:")
-        print(f"  - Model path: {pretrained_model_name_or_path}")
-        
-        # Load Qwen2.5 model weights
-        from transformers import AutoModelForCausalLM
-        
-        # Determine device
-        device = kwargs.get('device_map', 'cpu')
-        if isinstance(device, str) and device == 'auto':
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
-        # Load Qwen2.5 model
-        qwen_model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path,
-            **kwargs
-        )
-        
-        print(f"  - Qwen2.5 parameters: {sum(p.numel() for p in qwen_model.parameters()):,}")
-        print(f"  - TiDAR parameters: {sum(p.numel() for p in model.parameters()):,}")
-        
-        # Get state dicts
-        qwen_state_dict = qwen_model.state_dict()
-        
-        # Load weights
-        missing_keys, unexpected_keys = model.load_state_dict(qwen_state_dict, strict=False)
-        
-        print(f"✓ Weights loaded")
-        if missing_keys:
-            print(f"  - Missing keys: {len(missing_keys)}")
-            # Only show first 5 missing keys
-            for key in missing_keys[:5]:
-                print(f"    * {key}")
-            if len(missing_keys) > 5:
-                print(f"    ... and {len(missing_keys) - 5} more")
-        else:
-            print(f"  - Missing keys: 0")
-        
-        if unexpected_keys:
-            print(f"  - Unexpected keys: {len(unexpected_keys)}")
-            # Only show first 5 unexpected keys
-            for key in unexpected_keys[:5]:
-                print(f"    * {key}")
-            if len(unexpected_keys) > 5:
-                print(f"    ... and {len(unexpected_keys) - 5} more")
-        else:
-            print(f"  - Unexpected keys: 0")
-        
-        # Verify weight transfer
-        print(f"\n5. Verifying weight transfer:")
-        
-        # Compare some key weights
-        with torch.no_grad():
-            # Compare embedding weights
-            qwen_embed = qwen_model.model.embed_tokens.weight
-            tidar_embed = model.model.embed_tokens.weight
+        # Try to load configuration to detect model type
+        try:
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
             
-            # Move to same device for comparison
-            if qwen_embed.device != tidar_embed.device:
-                qwen_embed = qwen_embed.to(tidar_embed.device)
+            # Check if it's already a TiDAR model
+            if isinstance(config, TiDARQwen2Config) or config.model_type == "tidar_qwen2":
+                # Direct loading of TiDAR checkpoint
+                if kwargs.get('local_rank', 0) == 0 or not torch.distributed.is_initialized():
+                    print(f"Loading TiDAR checkpoint from: {pretrained_model_name_or_path}")
+                
+                # Use parent class's from_pretrained for direct loading
+                model = super(TiDARQwen2ForCausalLM, cls).from_pretrained(
+                    pretrained_model_name_or_path,
+                    **kwargs
+                )
+                return model
             
-            embed_diff = torch.abs(qwen_embed - tidar_embed).max().item()
-            print(f"  - Embedding weight max difference: {embed_diff:.2e}")
-            
-            # Compare first layer attention weights
-            qwen_attn = qwen_model.model.layers[0].self_attn.q_proj.weight
-            tidar_attn = model.model.layers[0].self_attn.q_proj.weight
-            
-            # Move to same device for comparison
-            if qwen_attn.device != tidar_attn.device:
-                qwen_attn = qwen_attn.to(tidar_attn.device)
-            
-            attn_diff = torch.abs(qwen_attn - tidar_attn).max().item()
-            print(f"  - First layer Q projection max difference: {attn_diff:.2e}")
-            
-            if embed_diff < 1e-5 and attn_diff < 1e-5:
-                print(f"  ✓ Weights transferred successfully!")
             else:
-                print(f"  ⚠ Weight differences detected (may be expected for some parameters)")
+                # Converting from Qwen2.5 to TiDAR
+                if kwargs.get('local_rank', 0) == 0 or not torch.distributed.is_initialized():
+                    print(f"Converting Qwen2.5 model to TiDAR from: {pretrained_model_name_or_path}")
+                
+                # Convert to TiDAR configuration
+                tidar_config = TiDARQwen2Config.from_qwen2_config(
+                    config,
+                    block_size=block_size,
+                    clean_ratio=clean_ratio,
+                    use_tidar=use_tidar
+                )
+                
+                # Initialize TiDAR model with converted config
+                model = cls(tidar_config)
+                
+                # Load Qwen2.5 weights and transfer to TiDAR model
+                qwen_model = AutoModelForCausalLM.from_pretrained(
+                    pretrained_model_name_or_path,
+                    **kwargs
+                )
+                
+                # Transfer weights (strict=False allows for architecture differences)
+                model.load_state_dict(qwen_model.state_dict(), strict=False)
+                
+                return model
+                
+        except Exception as e:
+            # Fallback: try direct loading as TiDAR checkpoint
+            if kwargs.get('local_rank', 0) == 0 or not torch.distributed.is_initialized():
+                print(f"Attempting direct loading as TiDAR checkpoint: {pretrained_model_name_or_path}")
+            
+            return super(TiDARQwen2ForCausalLM, cls).from_pretrained(
+                pretrained_model_name_or_path,
+                **kwargs
+            )
+    
+    def save_pretrained(
+        self,
+        save_directory: str,
+        save_config: bool = True,
+        **kwargs
+    ):
+        """
+        Save TiDAR model and configuration to a directory.
         
-        # Test forward pass
-        print(f"\n6. Testing forward pass:")
+        This creates a proper TiDAR checkpoint that can be loaded directly
+        without needing to convert from Qwen2.5 again.
         
-        # Create test input
-        batch_size = 2
-        seq_length = 32
-        input_ids = torch.randint(0, tidar_config.vocab_size, (batch_size, seq_length))
+        Args:
+            save_directory: Directory to save the model
+            save_config: Whether to save the configuration file
+            **kwargs: Additional arguments passed to parent's save_pretrained
+            
+        Example:
+            ```python
+            # Convert from Qwen2.5 and save
+            model = TiDARQwen2ForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-1.5B-Instruct",
+                block_size=8,
+                clean_ratio=0.5
+            )
+            model.save_pretrained("./tidar_checkpoints/initial")
+            
+            # Later, load directly
+            model = TiDARQwen2ForCausalLM.from_pretrained("./tidar_checkpoints/initial")
+            ```
+        """
+        import os
         
-        # Move to same device as model
-        if hasattr(model, 'device'):
-            input_ids = input_ids.to(model.device)
+        # Create directory if it doesn't exist
+        os.makedirs(save_directory, exist_ok=True)
         
-        print(f"  - Test input shape: {input_ids.shape}")
+        # Save using parent class method (saves weights and config)
+        super().save_pretrained(save_directory, save_config=save_config, **kwargs)
         
-        # Test standard forward pass
-        with torch.no_grad():
-            outputs = model(input_ids)
-        
-        print(f"  - Output logits shape: {outputs.logits.shape}")
-        print(f"  ✓ Forward pass successful!")
-        
-        # Test TiDAR format forward pass
-        print(f"\n7. Testing TiDAR format:")
-        
-        clean_length = int(seq_length * clean_ratio)
-        MASK_TOKEN_ID = 151643  # Qwen2.5 mask token id
-        
-        clean_tokens = torch.randint(0, MASK_TOKEN_ID, (batch_size, clean_length))
-        masked_tokens = torch.full((batch_size, seq_length - clean_length), MASK_TOKEN_ID, dtype=torch.long)
-        
-        if hasattr(model, 'device'):
-            clean_tokens = clean_tokens.to(model.device)
-            masked_tokens = masked_tokens.to(model.device)
-        
-        tidar_input_ids = torch.cat([clean_tokens, masked_tokens], dim=1)
-        
-        print(f"  - Clean tokens: {clean_length}")
-        print(f"  - Masked tokens: {seq_length - clean_length}")
-        print(f"  - TiDAR input shape: {tidar_input_ids.shape}")
-        
-        with torch.no_grad():
-            tidar_outputs = model(tidar_input_ids)
-        
-        print(f"  - TiDAR output logits shape: {tidar_outputs.logits.shape}")
-        print(f"  ✓ TiDAR format forward pass successful!")
-        
-        print(f"\n" + "=" * 80)
-        print("✓ Qwen2.5 successfully converted to TiDAR model!")
-        print("=" * 80)
-        
-        print(f"\nModel Summary:")
-        print(f"  - Model: TiDAR-Qwen2.5")
-        print(f"  - Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        print(f"  - Block size: {block_size}")
-        print(f"  - Clean ratio: {clean_ratio}")
-        print(f"  - TiDAR mode: {use_tidar}")
-        
-        return model
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f"✓ TiDAR model saved to: {save_directory}")
+        else:
+            print(f"✓ TiDAR model saved to: {save_directory}")
     
     def prepare_inputs_for_generation(
         self,

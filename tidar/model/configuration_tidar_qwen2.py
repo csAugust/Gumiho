@@ -46,3 +46,41 @@ class TiDARQwen2Config(Qwen2Config):
             raise ValueError(f"clean_ratio must be between 0 and 1, got {clean_ratio}")
         if block_size <= 0:
             raise ValueError(f"block_size must be positive, got {block_size}")
+    
+    @classmethod
+    def from_qwen2_config(
+        cls,
+        qwen_config: Qwen2Config,
+        block_size: int = 8,
+        clean_ratio: float = 0.5,
+        use_tidar: bool = True,
+        **kwargs
+    ) -> "TiDARQwen2Config":
+        """
+        Create TiDAR configuration from Qwen2 configuration.
+        
+        Args:
+            qwen_config: Qwen2 configuration to convert
+            block_size: Block size for block-wise bidirectional attention
+            clean_ratio: Ratio of clean tokens in the input sequence
+            use_tidar: Whether to enable TiDAR mode
+            **kwargs: Additional configuration parameters
+            
+        Returns:
+            TiDARQwen2Config instance with Qwen2 parameters and TiDAR extensions
+        """
+        # Extract all Qwen2 config attributes
+        qwen_dict = qwen_config.to_dict()
+        
+        # Remove model_type to avoid conflicts
+        qwen_dict.pop('model_type', None)
+        
+        # Add TiDAR-specific parameters
+        qwen_dict.update({
+            'block_size': block_size,
+            'clean_ratio': clean_ratio,
+            'use_tidar': use_tidar,
+            **kwargs
+        })
+        
+        return cls(**qwen_dict)

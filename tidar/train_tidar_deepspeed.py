@@ -405,19 +405,45 @@ if rank == 0:
 if rank == 0:
     logger.info("Initializing TiDAR model...")
 
-model = TiDARQwen2ForCausalLM.from_pretrained(
-    pretrained_model_name_or_path=args.qwen_model_path,
-    block_size=args.tidar_block_size,
-    clean_ratio=args.tidar_clean_ratio,
-    use_tidar=True,
-    torch_dtype=torch.float16,
-    device_map=None  # Will be handled by DeepSpeed
-)
+# Check if we should use an existing TiDAR checkpoint or convert from Qwen
+tidar_init_checkpoint = os.path.join(args.ckpt_dir, "tidar_init")
+use_existing_tidar_init = os.path.exists(os.path.join(tidar_init_checkpoint, "config.json"))
 
-# Load existing checkpoint if specified
+if use_existing_tidar_init:
+    # Load from existing TiDAR initialization checkpoint (fast path)
+    if rank == 0:
+        logger.info(f"Loading from existing TiDAR initialization: {tidar_init_checkpoint}")
+    
+    model = TiDARQwen2ForCausalLM.from_pretrained(
+        pretrained_model_name_or_path=tidar_init_checkpoint,
+        torch_dtype=torch.float16,
+        device_map=None  # Will be handled by DeepSpeed
+    )
+else:
+    # Convert from Qwen2.5 (slow path, only happens once)
+    if rank == 0:
+        logger.info(f"Converting from Qwen2.5: {args.qwen_model_path}")
+        logger.info("This is a one-time conversion. A TiDAR checkpoint will be saved for future use.")
+    
+    model = TiDARQwen2ForCausalLM.from_pretrained(
+        pretrained_model_name_or_path=args.qwen_model_path,
+        block_size=args.tidar_block_size,
+        clean_ratio=args.tidar_clean_ratio,
+        use_tidar=True,
+        torch_dtype=torch.float16,
+        device_map=None  # Will be handled by DeepSpeed
+    )
+    
+    # Save the initial TiDAR checkpoint for future use
+    if rank == 0:
+        logger.info(f"Saving initial TiDAR checkpoint to: {tidar_init_checkpoint}")
+        model.save_pretrained(tidar_init_checkpoint)
+        logger.info("✓ Initial TiDAR checkpoint saved. Future runs will load this directly.")
+
+# Load existing training checkpoint if specified
 if args.existing_model_path is not None:
     if rank == 0:
-        logger.info(f"Loading checkpoint from {args.existing_model_path}")
+        logger.info(f"Loading training checkpoint from {args.existing_model_path}")
     checkpoint = torch.load(args.existing_model_path, map_location=f"cuda:{rank}")
     model.load_state_dict(checkpoint, strict=True)
 
