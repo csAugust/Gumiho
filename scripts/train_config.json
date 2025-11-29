@@ -49,17 +49,5 @@
     "beta1": 0.9,
     "beta2": 0.95,
     "grad_clip": 0.5
-  },
-  "spaf_training": {
-    "num_epochs": 3,
-    "max_seq_length": 512,
-    "batch_size": 8,
-    "adapter_dim_ratio": 0.25,
-    "alignment_weight": 1.0,
-    "adapter_weight": 1.0,
-    "alignment_loss_type": "mse",
-    "logging_steps": 100,
-    "save_steps": 1000,
-    "eval_steps": 500
   }
 }
