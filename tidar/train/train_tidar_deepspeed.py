@@ -34,12 +34,12 @@ parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for d
 parser.add_argument('--existing_model_path', type=str, help='Path to existing model checkpoint to resume from')
 
 # TiDAR-specific arguments
-parser.add_argument('--qwen_model_path', type=str, default="Qwen/Qwen2.5-1.5B",
-                    help='Path to the Qwen2.5 base model')
-parser.add_argument('--tidar_block_size', type=int, default=8,
-                    help='Block size for block-wise bidirectional attention')
-parser.add_argument('--tidar_clean_ratio', type=float, default=0.5,
-                    help='Ratio of clean tokens in the sequence')
+# parser.add_argument('--qwen_model_path', type=str, default="Qwen/Qwen2.5-1.5B",
+#                     help='Path to the Qwen2.5 base model')
+# parser.add_argument('--tidar_block_size', type=int, default=8,
+#                     help='Block size for block-wise bidirectional attention')
+# parser.add_argument('--tidar_clean_ratio', type=float, default=0.5,
+#                     help='Ratio of clean tokens in the sequence')
 
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
@@ -117,7 +117,7 @@ class CustomDataset(Dataset):
         self.tokenizer = tokenizer
         # Since we'll double the sequence, actual limit is max_len // 2
         self.max_len = max_len // 2
-        self.mask_token_id = tokenizer.mask_token_id if hasattr(tokenizer, 'mask_token_id') else 151643
+        self.mask_token_id = tokenizer.mask_token_id if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id else 151643
 
     def __len__(self):
         return len(self.data)
@@ -320,15 +320,15 @@ def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
         seq_len = seq_lengths[i].item()  # S
         
         # 1. AR Loss (first S positions)
-        # Predicting positions 1 to S-1 from positions 0 to S-2
-        ar_logits = logits[i, :seq_len-1, :]  # [S-1, vocab_size]
-        ar_labels = labels[i, 1:seq_len]  # [S-1] - shifted labels
-        ar_mask = loss_mask[i, 1:seq_len]  # [S-1] - shifted loss_mask
+        # Predicting positions 0 to S-1 from positions 0 to S-1
+        ar_logits = logits[i, :seq_len, :]  # [S-1, vocab_size]
+        ar_labels = labels[i, :seq_len]  # [S-1] - shifted labels
+        ar_mask = loss_mask[i, :seq_len]  # [S-1] - shifted loss_mask
         
         # Compute AR loss
         ar_loss = loss_fct(ar_logits, ar_labels)
         # Apply both label validity check and loss_mask
-        valid_ar = (ar_labels != -100) & (ar_mask > 0)
+        valid_ar = (ar_mask > 0)
         if valid_ar.sum() > 0:
             ar_loss_total += ar_loss[valid_ar].sum()
             ar_count += valid_ar.sum().item()
@@ -342,7 +342,7 @@ def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
         # Compute Diffusion loss
         diff_loss = loss_fct(diff_logits, diff_labels)
         # Apply both label validity check and loss_mask
-        valid_diff = (diff_labels != -100) & (diff_mask > 0)
+        valid_diff = (diff_mask > 0)
         if valid_diff.sum() > 0:
             diffusion_loss_total += diff_loss[valid_diff].sum()
             diffusion_count += valid_diff.sum().item()
