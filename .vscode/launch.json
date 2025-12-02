@@ -2,6 +2,19 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python: Test TiDAR Generate",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tidar/test_tidar_generate.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}"
+        },
+        {
             "name": "Debug Eval (Single GPU)",
             "type": "debugpy",
             "request": "launch",
