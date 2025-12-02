@@ -363,8 +363,8 @@ def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
         accuracy = correct.sum().float() / (valid_labels.sum().float() + 1e-8)
     
     metrics = {
-        "ar_loss": ar_loss.item() if isinstance(ar_loss, torch.Tensor) else ar_loss,
-        "diffusion_loss": diffusion_loss.item() if isinstance(diffusion_loss, torch.Tensor) else diffusion_loss,
+        "ar_loss": ar_loss.detach().item() if isinstance(ar_loss, torch.Tensor) else ar_loss,
+        "diffusion_loss": diffusion_loss.detach().item() if isinstance(diffusion_loss, torch.Tensor) else diffusion_loss,
         "accuracy": accuracy.item(),
         "ar_tokens": ar_count,
         "diffusion_tokens": diffusion_count,
@@ -516,23 +516,23 @@ for epoch in range(args.start_epoch, args.num_epochs):
         model_engine.step()
         
         # Accumulate metrics
-        epoch_loss += total_loss.item()
+        epoch_loss += total_loss.detach().item()
         epoch_ar_loss += metrics["ar_loss"]
         epoch_diffusion_loss += metrics["diffusion_loss"]
         num_batches += 1
         
         # Log batch metrics
         if rank == 0:
-            writer.add_scalar("train/batch_loss", total_loss.item(), epoch * len(train_loader) + batch_idx)
+            writer.add_scalar("train/batch_loss", total_loss.detach().item(), epoch * len(train_loader) + batch_idx)
             writer.add_scalar("train/batch_ar_loss", metrics["ar_loss"], epoch * len(train_loader) + batch_idx)
             writer.add_scalar("train/batch_diffusion_loss", metrics["diffusion_loss"], epoch * len(train_loader) + batch_idx)
             writer.add_scalar("train/batch_accuracy", metrics["accuracy"], epoch * len(train_loader) + batch_idx)
             writer.add_scalar("train/lr", optimizer.optimizer.param_groups[0]["lr"], epoch * len(train_loader) + batch_idx)
             
-            if batch_idx % 100 == 0:
+            if batch_idx % 10 == 0:
                 logger.info(
                     f"Epoch {epoch} Batch {batch_idx}: "
-                    f"Loss={total_loss.item():.4f}, "
+                    f"Loss={total_loss.detach().item():.4f}, "
                     f"AR Loss={metrics['ar_loss']:.4f}, "
                     f"Diff Loss={metrics['diffusion_loss']:.4f}, "
                     f"Acc={metrics['accuracy']:.4f}"
