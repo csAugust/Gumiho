@@ -152,7 +152,10 @@ class CustomDataset(Dataset):
             torch.tensor([0], dtype=torch.long)  # No loss for last position
         ])
         # Diffusion loss_mask: same as original (all positions contribute to diffusion loss)
-        diffusion_loss_mask = original_loss_mask  # [m1, m2, ..., mS]
+        diffusion_loss_mask = torch.cat([
+            torch.tensor([0], dtype=torch.long),  # No loss for first position
+            original_loss_mask[1:],  # Shift mask to align with shifted labels
+        ])  # [m1, m2, ..., mS]
         loss_mask = torch.cat([ar_loss_mask, diffusion_loss_mask])  # Length 2S
         
         # 4. Construct position_ids: [0..S-1, 0..S-1] (restarting for masked region)
@@ -309,12 +312,14 @@ def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
     batch_size, total_seq_length, vocab_size = logits.shape
     
     # Compute cross-entropy loss
-    loss_fct = nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+    loss_fct = nn.CrossEntropyLoss(reduction='none', ignore_index=0)
     
-    ar_loss_total = 0.0
-    diffusion_loss_total = 0.0
+    device = logits.device
+    ar_loss_total = torch.tensor(0.0, device=device)
+    diffusion_loss_total = torch.tensor(0.0, device=device)
     ar_count = 0
     diffusion_count = 0
+    diff_correct_count = 0
     
     for i in range(batch_size):
         seq_len = seq_lengths[i].item()  # S
@@ -346,6 +351,13 @@ def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
         if valid_diff.sum() > 0:
             diffusion_loss_total += diff_loss[valid_diff].sum()
             diffusion_count += valid_diff.sum().item()
+
+        
+        with torch.no_grad():
+            diff_predictions = torch.argmax(diff_logits, dim=-1)
+            diff_valid_labels = (diff_labels != -100) & (diff_mask > 0)
+            diff_correct = (diff_predictions == diff_labels) & diff_valid_labels
+            diff_correct_count += diff_correct.sum().float()
     
     # Average losses
     ar_loss = ar_loss_total / (ar_count + 1e-8)
@@ -361,11 +373,14 @@ def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
         valid_labels = (labels != -100) & (loss_mask > 0)
         correct = (predictions == labels) & valid_labels
         accuracy = correct.sum().float() / (valid_labels.sum().float() + 1e-8)
+
+        diff_accuracy = diff_correct_count / diffusion_count
     
     metrics = {
         "ar_loss": ar_loss.detach().item() if isinstance(ar_loss, torch.Tensor) else ar_loss,
         "diffusion_loss": diffusion_loss.detach().item() if isinstance(diffusion_loss, torch.Tensor) else diffusion_loss,
         "accuracy": accuracy.item(),
+        "diff_accuracy": diff_accuracy.item(),
         "ar_tokens": ar_count,
         "diffusion_tokens": diffusion_count,
     }
@@ -417,6 +432,7 @@ if use_existing_tidar_init:
     model = TiDARQwen2ForCausalLM.from_pretrained(
         pretrained_model_name_or_path=tidar_init_checkpoint,
         torch_dtype=torch.float16,
+        is_training=True,
         device_map=None  # Will be handled by DeepSpeed
     )
 else:
@@ -430,6 +446,7 @@ else:
         block_size=args.tidar_block_size,
         clean_ratio=args.tidar_clean_ratio,
         use_tidar=True,
+        is_training=True,
         torch_dtype=torch.float16,
         device_map=None  # Will be handled by DeepSpeed
     )
@@ -444,7 +461,12 @@ else:
 if args.existing_model_path is not None:
     if rank == 0:
         logger.info(f"Loading training checkpoint from {args.existing_model_path}")
-    checkpoint = torch.load(args.existing_model_path, map_location=f"cuda:{rank}")
+
+    local_rank = int(os.environ.get('LOCAL_RANK', -1))
+    if local_rank == -1:
+        local_rank = rank 
+    map_location = f"cuda:{local_rank}"
+    checkpoint = torch.load(args.existing_model_path, map_location=map_location)
     model.load_state_dict(checkpoint, strict=True)
 
 # Initialize DeepSpeed
@@ -490,11 +512,13 @@ for epoch in range(args.start_epoch, args.num_epochs):
             break
         
         # Move batch to device
-        input_ids = batch["input_ids"].to(rank)
-        labels = batch["labels"].to(rank)
-        loss_mask = batch["loss_mask"].to(rank)
-        position_ids = batch["position_ids"].to(rank)
-        attention_mask = batch["attention_mask"].to(rank)
+        batch = {k: v.to(model_engine.device, non_blocking=True) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+    
+        input_ids = batch["input_ids"]
+        labels = batch["labels"]
+        loss_mask = batch["loss_mask"]
+        position_ids = batch["position_ids"]
+        attention_mask = batch["attention_mask"]
         seq_lengths = batch["seq_lengths"]
         
         # Forward pass
@@ -527,6 +551,7 @@ for epoch in range(args.start_epoch, args.num_epochs):
             writer.add_scalar("train/batch_ar_loss", metrics["ar_loss"], epoch * len(train_loader) + batch_idx)
             writer.add_scalar("train/batch_diffusion_loss", metrics["diffusion_loss"], epoch * len(train_loader) + batch_idx)
             writer.add_scalar("train/batch_accuracy", metrics["accuracy"], epoch * len(train_loader) + batch_idx)
+            writer.add_scalar("train/batch_accuracy_diff", metrics["diff_accuracy"], epoch * len(train_loader) + batch_idx)
             writer.add_scalar("train/lr", optimizer.optimizer.param_groups[0]["lr"], epoch * len(train_loader) + batch_idx)
             
             if batch_idx % 10 == 0:
@@ -536,6 +561,7 @@ for epoch in range(args.start_epoch, args.num_epochs):
                     f"AR Loss={metrics['ar_loss']:.4f}, "
                     f"Diff Loss={metrics['diffusion_loss']:.4f}, "
                     f"Acc={metrics['accuracy']:.4f}"
+                    f"Acc_diff={metrics['diff_accuracy']:.4f}"
                 )
     
     # Epoch summary

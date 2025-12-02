@@ -198,40 +198,6 @@ class TiDARModel(Qwen2Model):
             [TiDARDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
     
-    def _update_causal_mask(
-        self,
-        attention_mask: torch.Tensor,
-        input_tensor: torch.Tensor,
-        cache_position: torch.Tensor,
-        past_key_values: Optional[List[List[KVCache]]],
-        output_attentions: bool = False,
-    ):
-        """
-        Override to support TiDAR's hybrid attention mask.
-        
-        Args:
-            attention_mask: Original attention mask (for padding)
-            input_tensor: Input hidden states
-            cache_position: Position cache
-            past_key_values: Past key values cache
-            output_attentions: Whether to output attentions
-            
-        Returns:
-            Hybrid attention mask for TiDAR
-        """
-        if self.config.use_tidar:
-            if self.config.is_training:
-                return self._create_hybrid_attention_mask_train(
-                    attention_mask, input_tensor, cache_position, past_key_values
-                )
-            else:
-                assert attention_mask is not None
-                return attention_mask
-        
-        
-        return self._prepare_decoder_attention_mask(attention_mask, input_tensor.shape)
-            
-    
     def _prepare_decoder_attention_mask(
             self, attention_mask, input_shape, inputs_embeds, past_key_values_length
     ):
@@ -326,20 +292,17 @@ class TiDARModel(Qwen2Model):
             hybrid_mask[:clean_length, :clean_length] = causal_mask.float() * min_dtype
         
         # 2. Bottom-right: Block-wise bidirectional mask for masked tokens (diffusion mode)
+        # 3. Bottom-left: Full attention from masked to clean tokens (conditioning)
         if masked_length > 0:
             block_size = self.config.block_size
             for i in range(clean_length, seq_length, block_size):
                 block_end = min(i + block_size, seq_length)
+                # 2. Bottom-right:
                 # Within each block, tokens can attend to each other (bidirectional)
                 hybrid_mask[i:block_end, i:block_end] = 0
-        
-        # 3. Bottom-left: Full attention from masked to clean tokens (conditioning)
-        if masked_length > 0 and clean_length > 0:
-            hybrid_mask[clean_length:, :clean_length] = 0
-        
-        # 4. Top-right: No attention from clean to masked tokens (no leakage)
-        if clean_length > 0 and masked_length > 0:
-            hybrid_mask[:clean_length, clean_length:] = min_dtype
+                # 3. Bottom-left:
+                if i > clean_length: # start from second block
+                    hybrid_mask[i:block_end, :i-clean_length] = 0
         
         # Expand to batch dimension
         hybrid_mask = hybrid_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
@@ -699,12 +662,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
         return CausalLMOutputWithPast(
-            loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
@@ -879,7 +837,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             logits_processor
         )
         prefill_output_token = prefill_output_tokens[:, 0]
-        accepted_tokens = torch.cat([accepted_tokens, prefill_output_token], dim=1)
+        accepted_tokens = torch.cat([accepted_tokens, prefill_output_token.unsqueeze(0)], dim=1)
         num_generated += 1
         current_draft_tokens = prefill_output_tokens
 
@@ -930,7 +888,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             # We need to update past_key_values to reflect the newly accepted tokens
             # This requires a forward pass with the accepted tokens
             if accept_length != draft_len:
-                rollback_past_key_values(past_key_values, accepted_tokens.shape[1])
+                rollback_past_key_values(past_key_values, accepted_tokens.shape[1] - 1)
 
             # Step 6: Check termination conditions
             if eos_token_id is not None:

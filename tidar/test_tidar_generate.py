@@ -9,6 +9,9 @@ from transformers import AutoTokenizer
 from model.modeling_tidar_qwen2 import TiDARQwen2ForCausalLM
 import os
 import sys
+from fastchat.model import get_conversation_template
+
+from model.modeling_qwen2 import Qwen2ForCausalLM
 
 # sys.path.append(os.path.dirname(__file__))
 
@@ -20,9 +23,28 @@ def test_tidar_generation():
     qwen_model_path = "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct"  # Small model for testing
     tidar_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/tidar_init"  # Small model for testing
     draft_len = 3
-    max_new_tokens = 10
+    max_new_tokens = 50
     prompt = "Once upon a time, "
+
+    tokenizer = AutoTokenizer.from_pretrained(qwen_model_path)
+
+    # messages = [
+    #     {"role": "system", "content": 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\'t know the answer to a question, please don\'t share false information.'},
+    #     {"role": "user", "content": "Introduce Large Languag Models."}
+    # ]
+    # prompt = tokenizer.apply_chat_template(
+    #     messages,
+    #     tokenize=False,
+    #     add_generation_prompt=False,
+    # )
+    # print(prompt)
     
+    # conv = get_conversation_template("qwen2")
+    # conv.append_message(conv.roles[0], "Introduce Large Languag Models.")
+    # conv.append_message(conv.roles[1], None)
+    # prompt = conv.get_prompt()
+
+
     print("=" * 80)
     print("TiDAR Generation Test")
     print("=" * 80)
@@ -36,9 +58,7 @@ def test_tidar_generation():
     print("\nLoading model and tokenizer...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
-    
-    tokenizer = AutoTokenizer.from_pretrained(qwen_model_path)
-    
+        
     # Load TiDAR model
     model = TiDARQwen2ForCausalLM.from_pretrained(
         tidar_model_path,
@@ -55,11 +75,49 @@ def test_tidar_generation():
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
     print(f"Input length: {input_ids.shape[1]} tokens")
     
+
+    # Test 0: Qwen Generation
+    # print("\n" + "=" * 80)
+    # print("Test 0: Standard Autoregressive Generation")
+    # print("=" * 80)
+    
+    # qwen_model = Qwen2ForCausalLM.from_pretrained(
+    #     qwen_model_path,
+    #     torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+    #     device_map=device
+    # )
+
+    # torch.cuda.empty_cache() if device == "cuda" else None
+    
+    # start_time = time.time()
+    # with torch.no_grad():
+    #     standard_output = qwen_model.generate(
+    #         input_ids,
+    #         max_new_tokens=max_new_tokens,
+    #         do_sample=False,  # Greedy decoding for reproducibility
+    #         pad_token_id=tokenizer.eos_token_id,
+    #     )
+    # end_time = time.time()
+    
+    # standard_time = end_time - start_time
+    # standard_tokens = standard_output.shape[1] - input_ids.shape[1]
+    # standard_speed = standard_tokens / standard_time
+    
+    # standard_text = tokenizer.decode(standard_output[0], skip_special_tokens=True)
+    
+    # print(f"Generated {standard_tokens} tokens in {standard_time:.2f}s")
+    # print(f"Speed: {standard_speed:.2f} tokens/s")
+    # print(f"\nGenerated text:\n{standard_text[len(prompt):]}")
+    
     # Test 1: Standard Generation
     print("\n" + "=" * 80)
     print("Test 1: Standard Autoregressive Generation")
     print("=" * 80)
     
+    existing_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/epoch_199/pytorch_model.bin"
+    checkpoint = torch.load(existing_model_path)
+    model.load_state_dict(checkpoint, strict=True)
+
     torch.cuda.empty_cache() if device == "cuda" else None
     
     start_time = time.time()

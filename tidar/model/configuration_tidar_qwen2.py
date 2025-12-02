@@ -36,12 +36,13 @@ class TiDARQwen2Config(Qwen2Config):
         self.block_size = block_size
         self.use_tidar = use_tidar
         self.clean_ratio = clean_ratio
+        self.is_training = is_training
         self.tidar_config = tidar_config or {
             'block_size': block_size,
             'use_tidar': use_tidar,
-            'clean_ratio': clean_ratio
+            'clean_ratio': clean_ratio,
+            'is_training': is_training
         }
-        self.is_training = is_training
         
         # Validate parameters
         if not 0 < clean_ratio < 1:

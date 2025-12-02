@@ -12,7 +12,7 @@ torchrun --nproc_per_node=$RESOURCE_GPU \
          --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
          tidar/train/train_tidar_deepspeed.py \
            --deepspeed \
-           --deepspeed_config "tidar/train/ds_config.json" \
+           --deepspeed_config "tidar/train/ds_config_distributed.json" \
            --config_path "tidar/train/train_config.json"
 
 echo "Training completed!"
