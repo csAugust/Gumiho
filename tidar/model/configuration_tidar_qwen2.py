@@ -28,6 +28,7 @@ class TiDARQwen2Config(Qwen2Config):
         use_tidar: bool = True,
         clean_ratio: float = 0.5,
         tidar_config: dict = None,
+        is_training: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -40,6 +41,7 @@ class TiDARQwen2Config(Qwen2Config):
             'use_tidar': use_tidar,
             'clean_ratio': clean_ratio
         }
+        self.is_training = is_training
         
         # Validate parameters
         if not 0 < clean_ratio < 1:

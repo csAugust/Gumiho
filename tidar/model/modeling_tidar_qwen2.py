@@ -2,21 +2,87 @@
 TiDAR-Qwen2 Model Implementation
 """
 
+import random
+from functools import partial
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple, Union, List, Any
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 
+from .kv_cache import KVCache, initialize_past_key_values, rollback_past_key_values
 from .modeling_qwen2 import (
     Qwen2Attention,
     Qwen2DecoderLayer,
     Qwen2Model,
     Qwen2ForCausalLM,
-    Qwen2RMSNorm,
-    Qwen2MLP,
 )
 from .configuration_tidar_qwen2 import TiDARQwen2Config
+
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+    SequenceClassifierOutputWithPast,
+)
+
+def _make_causal_mask(
+        input_ids_shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+        past_key_values_length: int = 0,
+):
+    """
+    Create a causal mask for bi-directional self-attention.
+
+    Args:
+        input_ids_shape (torch.Size): The shape of input_ids tensor, typically (batch_size, tgt_len).
+        dtype (torch.dtype): The data type of the mask.
+        device (torch.device): The device on which the mask will be placed.
+        past_key_values_length (int, optional): The length of past key values. Default is 0.
+
+    Returns:
+        torch.Tensor: The causal mask tensor.
+    """
+    bsz, tgt_len = input_ids_shape
+    mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
+    mask_cond = torch.arange(mask.size(-1), device=device)
+    mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+    mask = mask.to(dtype)
+
+    if past_key_values_length > 0:
+        mask = torch.cat(
+            [
+                torch.zeros(
+                    tgt_len, past_key_values_length, dtype=dtype, device=device
+                ),
+                mask,
+            ],
+            dim=-1,
+        )
+    return mask[None, None, :, :].expand(
+        bsz, 1, tgt_len, tgt_len + past_key_values_length
+    )
+
+def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
+    """
+    Expand attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
+
+    Args:
+        mask (torch.Tensor): The attention mask tensor of shape `[bsz, seq_len]`.
+        dtype (torch.dtype): The data type of the mask.
+        tgt_len (Optional[int], optional): The target sequence length. If None, it defaults to the source sequence length.
+
+    Returns:
+        torch.Tensor: The expanded mask tensor.
+    """
+    bsz, src_len = mask.size()
+    tgt_len = tgt_len if tgt_len is not None else src_len
+
+    expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
+
+    inverted_mask = 1.0 - expanded_mask
+
+    return inverted_mask.masked_fill(
+        inverted_mask.to(torch.bool), torch.finfo(dtype).min
+    )
 
 
 class TiDARAttention(Qwen2Attention):
@@ -30,6 +96,72 @@ class TiDARAttention(Qwen2Attention):
     def __init__(self, config: TiDARQwen2Config, layer_idx: int):
         super().__init__(config, layer_idx)
         self.tidar_config = config.tidar_config
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[List[KVCache]] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Forward pass with custom KVCache support."""
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        from .modeling_qwen2 import apply_rotary_pos_emb
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # [MODIFIED] Using custom KVCache mechanism for preallocated GPU memory optimization
+        if past_key_value is not None:
+            # past_key_value is a list of two KVCache objects [key_cache, value_cache]
+            key_states = past_key_value[0].cat(key_states, dim=2)
+            value_states = past_key_value[1].cat(value_states, dim=2)
+
+        # Get attention interface
+        from .modeling_qwen2 import eager_attention_forward, repeat_kv, ALL_ATTENTION_FUNCTIONS
+        
+        sliding_window = None
+        if (
+            self.config.use_sliding_window
+            and getattr(self.config, "sliding_window", None) is not None
+            and self.layer_idx >= self.config.max_window_layers
+        ):
+            sliding_window = self.config.sliding_window
+
+        attention_interface = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+                from transformers.utils import logging
+                logger = logging.get_logger(__name__)
+                logger.warning_once(
+                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                )
+            else:
+                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=sliding_window,
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
 
 
 class TiDARDecoderLayer(Qwen2DecoderLayer):
@@ -71,7 +203,7 @@ class TiDARModel(Qwen2Model):
         attention_mask: torch.Tensor,
         input_tensor: torch.Tensor,
         cache_position: torch.Tensor,
-        past_key_values: Cache,
+        past_key_values: Optional[List[List[KVCache]]],
         output_attentions: bool = False,
     ):
         """
@@ -87,22 +219,60 @@ class TiDARModel(Qwen2Model):
         Returns:
             Hybrid attention mask for TiDAR
         """
-        # If TiDAR is disabled, use standard causal mask
-        if not self.config.use_tidar:
-            return super()._update_causal_mask(
-                attention_mask, input_tensor, cache_position, past_key_values, output_attentions
-            )
+        if self.config.use_tidar:
+            if self.config.is_training:
+                return self._create_hybrid_attention_mask_train(
+                    attention_mask, input_tensor, cache_position, past_key_values
+                )
+            else:
+                assert attention_mask is not None
+                return attention_mask
         
-        return self._create_hybrid_attention_mask(
-            attention_mask, input_tensor, cache_position, past_key_values
-        )
+        
+        return self._prepare_decoder_attention_mask(attention_mask, input_tensor.shape)
+            
     
-    def _create_hybrid_attention_mask(
+    def _prepare_decoder_attention_mask(
+            self, attention_mask, input_shape, inputs_embeds, past_key_values_length
+    ):
+        # create causal mask
+        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+        combined_attention_mask = None
+        if input_shape[-1] > 1:
+            combined_attention_mask = _make_causal_mask(
+                input_shape,
+                inputs_embeds.dtype,
+                device=inputs_embeds.device,
+                past_key_values_length=past_key_values_length,
+            )
+
+        if attention_mask is not None:
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            expanded_attn_mask = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+            ).to(inputs_embeds.device)
+            combined_attention_mask = (
+                expanded_attn_mask
+                if combined_attention_mask is None
+                else expanded_attn_mask + combined_attention_mask
+            )
+
+
+        if hasattr(self, "tree_mask") and self.tree_mask is not None:
+            tree_mask = self.tree_mask
+            tree_len = tree_mask.size(-1)
+            combined_attention_mask[:, :, -tree_len:, -tree_len:][
+                tree_mask == 0
+                ] = combined_attention_mask.min()
+
+        return combined_attention_mask
+
+    def _create_hybrid_attention_mask_train(
         self,
         attention_mask: torch.Tensor,
         input_tensor: torch.Tensor,
         cache_position: torch.Tensor,
-        past_key_values: Cache,
+        past_key_values: Optional[List[List[KVCache]]],
     ) -> torch.Tensor:
         """
         Create TiDAR's hybrid attention mask.
@@ -192,7 +362,7 @@ class TiDARModel(Qwen2Model):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[List[List[KVCache]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -214,28 +384,129 @@ class TiDARModel(Qwen2Model):
         """
         # Detect if this is TiDAR format
         if self.config.use_tidar and input_ids is not None:
-            seq_length = input_ids.shape[1]
-            clean_length = int(seq_length * self.config.clean_ratio)
+            assert position_ids is not None
+            assert attention_mask is not None
             
-            # If TiDAR format, ensure position encoding is correct
-            if position_ids is None and clean_length > 0 and clean_length < seq_length:
-                # Create TiDAR-style position encoding
-                # Both clean and masked tokens use positions 0, 1, 2, ..., S-1
-                position_ids = torch.arange(seq_length, device=input_ids.device)
-                position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-        
-        # Call parent forward
-        return super().forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            cache_position=cache_position,
-            **flash_attn_kwargs
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if self.gradient_checkpointing and self.training and use_cache:
+            use_cache = False
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        batch_size, seq_length = input_ids.shape
+        seq_length_with_past = seq_length
+        past_key_values_length = 0
+
+        if past_key_values is not None:
+            past_key_values_length = past_key_values[0][0].shape[2]
+            seq_length_with_past = seq_length_with_past + past_key_values_length
+
+        if cache_position is None:
+            cache_position = torch.arange(
+                seq_length_with_past, seq_length_with_past + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        if position_ids is None:
+            device = input_ids.device if input_ids is not None else inputs_embeds.device
+            position_ids = torch.arange(
+                past_key_values_length,
+                seq_length + past_key_values_length,
+                dtype=torch.long,
+                device=device,
+            )
+            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
+
+        if attention_mask is None:
+            attention_mask = torch.ones(
+                (batch_size, seq_length_with_past),
+                dtype=torch.bool,
+                device=inputs_embeds.device,
+            )
+
+        causal_mask = None
+        if self.config.use_tidar:
+            if self.config.is_training:
+                causal_mask = self._create_hybrid_attention_mask_train(
+                    attention_mask, inputs_embeds, cache_position, past_key_values
+                )
+            else:
+                assert attention_mask is not None
+                causal_mask = attention_mask
+        else:
+            causal_mask = self._prepare_decoder_attention_mask(
+                attention_mask,
+                (batch_size, seq_length),
+                inputs_embeds,
+                past_key_values_length,
+            )
+
+        hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+
+        for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
+
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    partial(decoder_layer.__call__, **flash_attn_kwargs),
+                    hidden_states,
+                    causal_mask,
+                    position_ids,
+                    past_key_value,
+                    output_attentions,
+                    use_cache,
+                    cache_position,
+                    position_embeddings,
+                )
+            else:
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    position_embeddings=position_embeddings,
+                    **flash_attn_kwargs,
+                )
+
+            hidden_states = layer_outputs[0]
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+        hidden_states = self.norm(hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values if use_cache else None,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
         )
 
 
@@ -268,6 +539,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         block_size: int = 8,
         clean_ratio: float = 0.5,
         use_tidar: bool = True,
+        is_training: bool = True,
         **kwargs
     ):
         """
@@ -317,7 +589,8 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
                     config,
                     block_size=block_size,
                     clean_ratio=clean_ratio,
-                    use_tidar=use_tidar
+                    use_tidar=use_tidar,
+                    is_training=is_training,
                 )
                 
                 # Initialize TiDAR model with converted config
@@ -389,29 +662,108 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         else:
             print(f"✓ TiDAR model saved to: {save_directory}")
     
-    def prepare_inputs_for_generation(
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0
+    ) -> CausalLMOutputWithPast:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        outputs: BaseModelOutputWithPast = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+    @torch.no_grad()
+    def naivegenerate(
         self,
         input_ids: torch.LongTensor,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        max_new_tokens: int = 128,
+        temperature: float = 0.0,
+        top_p: float = 0.0,
+        top_k: int = 0,
+        tokenizer = None,
         **kwargs
     ):
-        """
-        Prepare inputs for generation with TiDAR support.
-        """
-        # Call parent method
-        model_inputs = super().prepare_inputs_for_generation(
-            input_ids, past_key_values, attention_mask, inputs_embeds, **kwargs
-        )
-        
-        # TiDAR-specific input preparation can be added here
-        if self.config.use_tidar and past_key_values is not None:
-            # TiDAR KV cache management logic
-            pass
-        
-        return model_inputs
-    
+        self.model.config.use_tidar = False
+        logits_processor = self._prepare_logits_processor(temperature, top_p, top_k)
+
+        # Initialize the past key and value states
+        if hasattr(self, "past_key_values"):
+            past_key_values = self.past_key_values
+            past_key_values_data = self.past_key_values_data
+            current_length_data = self.current_length_data
+            # Reset the past key and value states
+            current_length_data.zero_()
+        else:
+            (
+                past_key_values,
+                past_key_values_data,
+                current_length_data,
+            ) = initialize_past_key_values(self.base_model)
+            self.past_key_values = past_key_values
+            self.past_key_values_data = past_key_values_data
+            self.current_length_data = current_length_data
+
+        input_len = input_ids.shape[1]
+        outputs = self(input_ids, past_key_values=past_key_values, use_cache=True)
+        new_token = 0
+
+        for idx in range(max_new_tokens):
+            if logits_processor is not None:
+                logits = outputs.logits[:, -1]
+                logits = logits_processor(None, logits)
+                probabilities = torch.nn.functional.softmax(logits, dim=-1)
+                input_id = torch.multinomial(probabilities, 1)
+            else:
+                input_id = outputs.logits[:, -1:].argmax(dim=-1)
+            outputs = self(input_id, use_cache=True, past_key_values=past_key_values)
+            input_ids = torch.cat([input_ids, input_id], dim=-1)
+            new_token+=1
+
+            if tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                break
+            if new_token > max_new_tokens:
+                break
+        return input_ids
+
     @torch.no_grad()
     def tidar_generate(
         self,
@@ -421,6 +773,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         top_p: float = 0.0,
         top_k: int = 0,
         draft_len: int = None,
+        tokenizer = None,
         **kwargs
     ):
         """
@@ -450,13 +803,8 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         Returns:
             Generated token ids [batch_size, seq_len + num_generated]
         """
-        from transformers.generation.logits_process import (
-            LogitsProcessorList,
-            TemperatureLogitsWarper,
-            TopKLogitsWarper,
-            TopPLogitsWarper,
-        )
         
+        self.model.config.use_tidar = True
         # Get draft length from config if not specified
         if draft_len is None:
             draft_len = self.config.block_size
@@ -466,15 +814,17 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         
         # Initialize variables
         batch_size = input_ids.shape[0]
+        assert batch_size == 1
+
         device = input_ids.device
         accepted_tokens = input_ids.clone()
         current_draft_tokens = torch.empty((batch_size, 0), dtype=torch.long, device=device)
-        past_key_values = None
+        
+        # [MODIFIED] Initialize custom KVCache
+        past_key_values, past_key_values_data_list, current_length_data = initialize_past_key_values(self)
         
         # Get mask token ID
-        mask_token_id = getattr(self.config, 'mask_token_id', self.config.vocab_size - 1)
-        
-        # Get EOS token ID
+        mask_token_id = tokenizer.mask_token_id if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id else 151643
         eos_token_id = self.config.eos_token_id
         
         # Track number of generated tokens
@@ -499,26 +849,42 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             dtype=torch.long,
             device=device
         ).unsqueeze(0).expand(batch_size, -1)
-        
+        prefill_position_ids[:, input_len:] += 1
+
         # Forward pass
+        prefill_attention_mask = self._create_tidar_attention_mask(
+            current_draft_len=input_len,
+            num_mask_blocks=1,
+            draft_len=draft_len,
+            kv_len=0,
+            batch_size=batch_size,
+            is_prefill=True,
+            device=device,
+            dtype=torch.float16
+        )
         prefill_outputs = self.model(
             input_ids=prefill_input,
+            attention_mask=prefill_attention_mask,
             position_ids=prefill_position_ids,
-            past_key_values=None,
+            past_key_values=past_key_values,
             use_cache=True,
         )
-        past_key_values = prefill_outputs.past_key_values
-        
-        # Get logits
         prefill_logits = self.lm_head(prefill_outputs.last_hidden_state)
-        
+
         # Extract draft logits from mask positions and sample initial draft
-        draft_logits = prefill_logits[:, -draft_len:, :]
-        current_draft_tokens = self._sample_from_logits(
-            draft_logits,
-            draft_len,
+        prefill_output_logits = prefill_logits[:, input_len - 1:, :]
+        prefill_output_tokens = self._sample_from_logits(
+            prefill_output_logits,
+            draft_len + 1,
             logits_processor
         )
+        prefill_output_token = prefill_output_tokens[:, 0]
+        accepted_tokens = torch.cat([accepted_tokens, prefill_output_token], dim=1)
+        num_generated += 1
+        current_draft_tokens = prefill_output_tokens
+
+        # Reset the current_length of each KVCache to input_len
+        rollback_past_key_values(past_key_values, input_len)
         
         # Main generation loop
         while num_generated < max_new_tokens:
@@ -546,48 +912,26 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
                     current_draft_tokens[:, :accept_length]
                 ], dim=1)
                 num_generated += accept_length
-            
-            # If rejection occurred, add resampled token
             if resampled_token is not None:
                 accepted_tokens = torch.cat([accepted_tokens, resampled_token], dim=1)
                 num_generated += 1
-                actual_accept_length = accept_length  # For table lookup
-            else:
-                # All draft tokens accepted
-                actual_accept_length = accept_length
             
             # Step 4: Table-lookup to select next draft tokens
             # Select from all_draft_logits based on actual_accept_length
-            next_draft_logits = all_draft_logits[actual_accept_length]  # Shape: [batch, draft_len, vocab]
-            current_draft_tokens = self._sample_from_logits(
+            next_draft_logits = all_draft_logits[accept_length]  # Shape: [batch, draft_len, vocab]
+            current_draft_tokens = torch.cat([resampled_token, self._sample_from_logits(
                 next_draft_logits,
                 draft_len,
                 logits_processor
-            )
+            )], dim=1)
+
             
             # Step 5: Update KV cache
             # We need to update past_key_values to reflect the newly accepted tokens
             # This requires a forward pass with the accepted tokens
-            if accept_length > 0 or resampled_token is not None:
-                # Determine which tokens to add to KV cache
-                if accept_length > 0 and resampled_token is not None:
-                    new_tokens = torch.cat([
-                        current_draft_tokens[:, :accept_length],
-                        resampled_token
-                    ], dim=1)
-                elif accept_length > 0:
-                    new_tokens = current_draft_tokens[:, :accept_length]
-                else:
-                    new_tokens = resampled_token
-                
-                # Update KV cache with accepted tokens
-                update_outputs = self.model(
-                    input_ids=new_tokens,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
-                past_key_values = update_outputs.past_key_values
-            
+            if accept_length != draft_len:
+                rollback_past_key_values(past_key_values, accepted_tokens.shape[1])
+
             # Step 6: Check termination conditions
             if eos_token_id is not None:
                 if eos_token_id in accepted_tokens[0, input_len:].tolist():
@@ -634,195 +978,56 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             accept_length: Number of accepted tokens
             resampled_token: Resampled token if rejection occurred, else None
         """
-        import random
         
-        batch_size = draft_tokens.shape[0]
-        draft_len = draft_tokens.shape[1]
+        batch_size, current_input_length = draft_tokens.shape
         accept_length = 0
-        resampled_token = None
+        last_verified_token = None
         
-        for i in range(draft_len):
-            # Get the current draft token
-            draft_token = draft_tokens[:, i:i+1]
-            
-            # Get validation logits for this position
+        for i in range(current_input_length):
             val_logits = validation_logits[:, i, :]
-            
-            # Apply logits processor if provided
             if logits_processor is not None:
                 val_logits = logits_processor(None, val_logits)
-            
-            # Get probability distribution
             probs = torch.softmax(val_logits, dim=-1)
-            
-            # Greedy or sampling validation
+
             if logits_processor is None:
                 # Greedy: check if draft token matches argmax
                 predicted_token = val_logits.argmax(dim=-1, keepdim=True)
-                if (draft_token == predicted_token).all():
-                    accept_length += 1
+                if i == current_input_length - 1:
+                    last_verified_token = predicted_token
                 else:
-                    # Rejection: use the predicted token
-                    resampled_token = predicted_token
-                    break
+                    draft_token = draft_tokens[:, i+1]
+                    if (draft_token == predicted_token).all():
+                        accept_length += 1
+                    else:
+                        # Rejection: use the predicted token
+                        last_verified_token = predicted_token
+                        break
             else:
-                # Sampling-based rejection sampling
-                draft_token_id = draft_token[0, 0].item()
-                p_draft = probs[0, draft_token_id].item()
-                
-                # Simplified rejection sampling: accept with probability p_draft
-                r = random.random()
-                if r <= p_draft:
-                    accept_length += 1
+                if i == current_input_length - 1:
+                    last_verified_token = predicted_token
                 else:
-                    # Rejection: resample from adjusted distribution
-                    # Set the rejected token's probability to 0 and renormalize
-                    probs[0, draft_token_id] = 0
-                    probs = probs / probs.sum(dim=-1, keepdim=True)
-                    resampled_token = torch.multinomial(probs, 1)
-                    break
+                    # Sampling-based rejection sampling
+                    draft_token_id = draft_token[0, 0].item()
+                    p_draft = probs[0, draft_token_id].item()
+                    
+                    # Simplified rejection sampling: accept with probability p_draft
+                    r = random.random()
+                    if r <= p_draft:
+                        accept_length += 1
+                    else:
+                        # Rejection: resample from adjusted distribution
+                        # Set the rejected token's probability to 0 and renormalize
+                        probs[0, draft_token_id] = 0
+                        probs = probs / probs.sum(dim=-1, keepdim=True)
+                        last_verified_token = torch.multinomial(probs, 1)
+                        break
         
-        return accept_length, resampled_token
-    
-    def _generate_draft_tokens(self, draft_logits, draft_len, logits_processor, device):
-        """
-        Generate new draft tokens from draft logits.
-        
-        Args:
-            draft_logits: Logits for draft generation [batch_size, num_masks, vocab_size]
-            draft_len: Number of draft tokens to generate
-            logits_processor: Logits processor for sampling
-            device: Device to use
-            
-        Returns:
-            new_draft_tokens: New draft tokens [batch_size, draft_len]
-        """
-        batch_size = draft_logits.shape[0]
-        
-        # Generate draft tokens from the first draft_len positions
-        # Each position should generate one token
-        new_draft_tokens = []
-        
-        for i in range(min(draft_len, draft_logits.shape[1])):
-            logits = draft_logits[:, i, :]
-            
-            if logits_processor is not None:
-                logits = logits_processor(None, logits)
-                probs = torch.softmax(logits, dim=-1)
-                token = torch.multinomial(probs, 1)
-            else:
-                token = logits.argmax(dim=-1, keepdim=True)
-            
-            new_draft_tokens.append(token)
-        
-        if len(new_draft_tokens) > 0:
-            new_draft_tokens = torch.cat(new_draft_tokens, dim=1)
-        else:
-            new_draft_tokens = torch.empty((batch_size, 0), dtype=torch.long, device=device)
-        
-        return new_draft_tokens
-    
-    def _truncate_kv_cache(self, past_key_values, keep_length):
-        """
-        Truncate KV cache to only keep the first keep_length positions.
-        
-        Args:
-            past_key_values: Past key values cache
-            keep_length: Number of positions to keep
-            
-        Returns:
-            Truncated past_key_values
-        """
-        if past_key_values is None:
-            return None
-        
-        # For DynamicCache or Cache objects
-        if hasattr(past_key_values, 'crop'):
-            # Use the crop method if available (transformers >= 4.36)
-            past_key_values.crop(keep_length)
-            return past_key_values
-        
-        # For tuple-based cache (legacy)
-        truncated_cache = []
-        for layer_cache in past_key_values:
-            truncated_layer = []
-            for cache_tensor in layer_cache:
-                # Truncate along the sequence dimension (typically dim=2)
-                truncated_layer.append(cache_tensor[:, :, :keep_length, :])
-            truncated_cache.append(tuple(truncated_layer))
-        
-        return tuple(truncated_cache)
-    
-    def _forward_with_masks(
-        self,
-        current_draft_tokens: torch.LongTensor,
-        past_key_values: Cache,
-        draft_len: int,
-        mask_token_id: int,
-        accept_length: int
-    ):
-        """
-        Forward pass with mask tokens to generate draft predictions.
-        
-        Args:
-            current_draft_tokens: Current draft tokens being validated [batch, draft_len]
-            past_key_values: KV cache containing accepted tokens
-            draft_len: Number of draft tokens to generate
-            mask_token_id: ID of the mask token
-            accept_length: Number of accepted tokens from current draft (for positioning)
-            
-        Returns:
-            draft_logits: Logits for the mask positions [batch, draft_len, vocab]
-        """
-        batch_size = current_draft_tokens.shape[0] if current_draft_tokens.numel() > 0 else past_key_values[0][0].shape[0]
-        device = current_draft_tokens.device if current_draft_tokens.numel() > 0 else past_key_values[0][0].device
-        
-        # Create mask block
-        mask_tokens = torch.full(
-            (batch_size, draft_len),
-            mask_token_id,
-            dtype=torch.long,
-            device=device
-        )
-        
-        # Combine current draft (if any) with mask tokens
-        if current_draft_tokens.numel() > 0:
-            input_ids = torch.cat([current_draft_tokens, mask_tokens], dim=1)
-        else:
-            input_ids = mask_tokens
-        
-        # Calculate position IDs
-        # They should start from the KV cache length + accept_length
-        kv_len = past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else past_key_values[0][0].shape[2]
-        start_pos = kv_len + accept_length
-        position_ids = torch.arange(
-            start_pos,
-            start_pos + input_ids.shape[1],
-            dtype=torch.long,
-            device=device
-        ).unsqueeze(0).expand(batch_size, -1)
-        
-        # Forward pass
-        outputs = self.model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=False,  # We don't need to update KV cache here
-        )
-        
-        # Get logits
-        logits = self.lm_head(outputs.last_hidden_state)
-        
-        # Extract draft logits (from mask positions)
-        draft_start = current_draft_tokens.shape[1] if current_draft_tokens.numel() > 0 else 0
-        draft_logits = logits[:, draft_start:, :]
-        
-        return draft_logits
+        return accept_length, last_verified_token
     
     def _forward_with_conditional_masks(
         self,
         current_draft_tokens: torch.LongTensor,
-        past_key_values: Cache,
+        past_key_values: KVCache,
         draft_len: int,
         mask_token_id: int
     ):
@@ -843,9 +1048,9 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             all_draft_logits: List of draft logits for each acceptance scenario
                              [(batch, draft_len, vocab)] * (draft_len + 1)
         """
-        batch_size = current_draft_tokens.shape[0]
+        batch_size, input_token_length = current_draft_tokens.shape
         device = current_draft_tokens.device
-        num_scenarios = draft_len + 1  # 0 to draft_len accepted tokens
+        num_scenarios = draft_len  # 0 to draft_len accepted tokens
         
         # Build input: [current_draft_tokens, mask_block_0, mask_block_1, ..., mask_block_K]
         # Each mask_block has draft_len MASK tokens
@@ -865,12 +1070,12 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         
         position_ids = []
         # Positions for current_draft_tokens
-        draft_positions = torch.arange(kv_len, kv_len + draft_len, dtype=torch.long, device=device)
+        draft_positions = torch.arange(kv_len, kv_len + draft_len + 1, dtype=torch.long, device=device)
         position_ids.append(draft_positions)
         
         # Positions for each mask_block_j
         for j in range(num_scenarios):
-            block_start = kv_len + j
+            block_start = kv_len + j + 2
             block_positions = torch.arange(
                 block_start,
                 block_start + draft_len,
@@ -884,12 +1089,14 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         # Build complex attention mask
         # This is the crucial part that implements TiDAR's parallel drafting
         attention_mask = self._create_tidar_attention_mask(
-            current_draft_len=draft_len,
+            current_draft_len=current_draft_tokens.shape[1],
             num_mask_blocks=num_scenarios,
             draft_len=draft_len,
             kv_len=kv_len,
             batch_size=batch_size,
-            device=device
+            is_prefill=False,
+            device=device,
+            dtype=torch.float16
         )
         
         # Forward pass
@@ -898,19 +1105,19 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             position_ids=position_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
-            use_cache=False,  # We don't update KV cache here
+            use_cache=True
         )
         
         # Get logits
         logits = self.lm_head(outputs.last_hidden_state)
         
         # Extract validation logits (for current_draft_tokens)
-        validation_logits = logits[:, :draft_len, :]
+        validation_logits = logits[:, :input_token_length, :]
         
         # Extract draft logits for each scenario
         all_draft_logits = []
         for j in range(num_scenarios):
-            start_idx = draft_len + j * draft_len
+            start_idx = input_token_length + j * draft_len
             end_idx = start_idx + draft_len
             scenario_logits = logits[:, start_idx:end_idx, :]
             all_draft_logits.append(scenario_logits)
@@ -924,7 +1131,9 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         draft_len: int,
         kv_len: int,
         batch_size: int,
-        device: torch.device
+        is_prefill: bool,
+        device: torch.device,
+        dtype: torch.dtype
     ):
         """
         Create complex attention mask for TiDAR's conditional parallel drafting.
@@ -950,11 +1159,11 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         
         # Create mask matrix
         # We'll use 0 for allowed attention, large negative for blocked
-        min_dtype = torch.finfo(torch.float32).min
+        min_dtype = torch.finfo(dtype).min
         mask = torch.full(
             (total_len, total_seq_len),
             min_dtype,
-            dtype=torch.float32,
+            dtype=dtype,
             device=device
         )
         
@@ -968,18 +1177,20 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             mask[i, kv_len:kv_len + i + 1] = 0
         
         # 3. Each mask_block_j
-        for j in range(num_mask_blocks):
-            block_start = current_draft_len + j * draft_len
-            block_end = block_start + draft_len
-            
-            # Can attend to KV cache (already set)
-            # Can attend to first j tokens of current_draft
-            if j > 0:
-                mask[block_start:block_end, kv_len:kv_len + j] = 0
-            
-            # Block-wise bidirectional attention within the block
-            for i in range(block_start, block_end):
-                mask[i, kv_len + block_start:kv_len + block_end] = 0
+        if is_prefill:
+            assert num_mask_blocks == 1
+            mask[current_draft_len:current_draft_len+draft_len, :] = 0
+        else:
+            for j in range(num_mask_blocks):
+                block_start = current_draft_len + j * draft_len
+                block_end = block_start + draft_len
+                
+                # Can attend to KV cache (already set)
+                # Can attend to first j tokens of current_draft
+                mask[block_start:block_end, kv_len:kv_len + j + 2] = 0
+                
+                # Block-wise bidirectional attention within the block
+                mask[block_start:block_end, kv_len + block_start:kv_len + block_end] = 0
         
         # Expand to batch dimension
         mask = mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1)
