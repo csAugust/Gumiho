@@ -402,8 +402,7 @@ class TiDARModel(Qwen2Model):
                     attention_mask, inputs_embeds, cache_position, past_key_values
                 )
             else:
-                assert attention_mask is not None
-                causal_mask = attention_mask
+                causal_mask = attention_mask + torch.ones_like(attention_mask, device=inputs_embeds.device)
         else:
             causal_mask = self._prepare_decoder_attention_mask(
                 attention_mask,
@@ -730,7 +729,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         temperature: float = 0.0,
         top_p: float = 0.0,
         top_k: int = 0,
-        draft_len: int = None,
+        block_size: int = None,
         tokenizer = None,
         **kwargs
     ):
@@ -764,8 +763,8 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         
         self.model.config.use_tidar = True
         # Get draft length from config if not specified
-        if draft_len is None:
-            draft_len = self.config.block_size
+        if block_size is None:
+            block_size = self.config.block_size
         
         # Prepare logits processor for sampling
         logits_processor = self._prepare_logits_processor(temperature, top_p, top_k)
@@ -794,7 +793,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         # 1. Populates KV cache for the prompt
         # 2. Generates initial draft tokens from the mask block
         mask_block = torch.full(
-            (batch_size, draft_len),
+            (batch_size, block_size),
             mask_token_id,
             dtype=torch.long,
             device=device
@@ -807,13 +806,13 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             dtype=torch.long,
             device=device
         ).unsqueeze(0).expand(batch_size, -1)
-        prefill_position_ids[:, input_len:] += 1
+        # prefill_position_ids[:, input_len:] += 1
 
         # Forward pass
         prefill_attention_mask = self._create_tidar_attention_mask(
-            current_draft_len=input_len,
+            current_input_len=input_len,
             num_mask_blocks=1,
-            draft_len=draft_len,
+            mask_block_size=block_size,
             kv_len=0,
             batch_size=batch_size,
             is_prefill=True,
@@ -830,15 +829,15 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         prefill_logits = self.lm_head(prefill_outputs.last_hidden_state)
 
         # Extract draft logits from mask positions and sample initial draft
-        prefill_output_logits = prefill_logits[:, input_len - 1:, :]
+        prefill_output_logits = prefill_logits[:, input_len:, :]
         prefill_output_tokens = self._sample_from_logits(
             prefill_output_logits,
-            draft_len + 1,
+            block_size,
             logits_processor
         )
         prefill_output_token = prefill_output_tokens[:, 0]
-        accepted_tokens = torch.cat([accepted_tokens, prefill_output_token.unsqueeze(0)], dim=1)
-        num_generated += 1
+        # accepted_tokens = torch.cat([accepted_tokens, prefill_output_token.unsqueeze(0)], dim=1)
+        # num_generated += 1
         current_draft_tokens = prefill_output_tokens
 
         # Reset the current_length of each KVCache to input_len
@@ -851,7 +850,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             validation_logits, all_draft_logits = self._forward_with_conditional_masks(
                 current_draft_tokens,
                 past_key_values,
-                draft_len,
+                block_size,
                 mask_token_id
             )
             
@@ -870,25 +869,31 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
                     current_draft_tokens[:, :accept_length]
                 ], dim=1)
                 num_generated += accept_length
-            if resampled_token is not None:
-                accepted_tokens = torch.cat([accepted_tokens, resampled_token], dim=1)
-                num_generated += 1
+            # if resampled_token is not None:
+            #     accepted_tokens = torch.cat([accepted_tokens, resampled_token], dim=1)
+            #     num_generated += 1
             
             # Step 4: Table-lookup to select next draft tokens
             # Select from all_draft_logits based on actual_accept_length
-            next_draft_logits = all_draft_logits[accept_length]  # Shape: [batch, draft_len, vocab]
-            current_draft_tokens = torch.cat([resampled_token, self._sample_from_logits(
+            next_draft_logits = all_draft_logits[accept_length - 1]  # Shape: [batch, draft_len, vocab]
+            # current_draft_tokens = torch.cat([resampled_token, self._sample_from_logits(
+            #     next_draft_logits,
+            #     block_size,
+            #     logits_processor
+            # )], dim=1)
+
+            current_draft_tokens = self._sample_from_logits(
                 next_draft_logits,
-                draft_len,
+                block_size,
                 logits_processor
-            )], dim=1)
+            )
 
             
             # Step 5: Update KV cache
             # We need to update past_key_values to reflect the newly accepted tokens
             # This requires a forward pass with the accepted tokens
-            if accept_length != draft_len:
-                rollback_past_key_values(past_key_values, accepted_tokens.shape[1] - 1)
+            if accept_length != block_size:
+                rollback_past_key_values(past_key_values, accepted_tokens.shape[1])
 
             # Step 6: Check termination conditions
             if eos_token_id is not None:
@@ -938,7 +943,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         """
         
         batch_size, current_input_length = draft_tokens.shape
-        accept_length = 0
+        accept_length = 1
         last_verified_token = None
         
         for i in range(current_input_length):
@@ -951,7 +956,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
                 # Greedy: check if draft token matches argmax
                 predicted_token = val_logits.argmax(dim=-1, keepdim=True)
                 if i == current_input_length - 1:
-                    last_verified_token = predicted_token
+                    last_verified_token = None
                 else:
                     draft_token = draft_tokens[:, i+1]
                     if (draft_token == predicted_token).all():
@@ -962,7 +967,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
                         break
             else:
                 if i == current_input_length - 1:
-                    last_verified_token = predicted_token
+                    last_verified_token = None
                 else:
                     # Sampling-based rejection sampling
                     draft_token_id = draft_token[0, 0].item()
@@ -986,7 +991,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         self,
         current_draft_tokens: torch.LongTensor,
         past_key_values: KVCache,
-        draft_len: int,
+        mask_block_size: int,
         mask_token_id: int
     ):
         """
@@ -1008,12 +1013,12 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         """
         batch_size, input_token_length = current_draft_tokens.shape
         device = current_draft_tokens.device
-        num_scenarios = draft_len  # 0 to draft_len accepted tokens
+        num_scenarios = mask_block_size  # 0 to draft_len accepted tokens
         
         # Build input: [current_draft_tokens, mask_block_0, mask_block_1, ..., mask_block_K]
         # Each mask_block has draft_len MASK tokens
         mask_blocks = torch.full(
-            (batch_size, num_scenarios * draft_len),
+            (batch_size, num_scenarios * mask_block_size),
             mask_token_id,
             dtype=torch.long,
             device=device
@@ -1028,15 +1033,15 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         
         position_ids = []
         # Positions for current_draft_tokens
-        draft_positions = torch.arange(kv_len, kv_len + draft_len + 1, dtype=torch.long, device=device)
+        draft_positions = torch.arange(kv_len, kv_len + mask_block_size, dtype=torch.long, device=device)
         position_ids.append(draft_positions)
         
         # Positions for each mask_block_j
         for j in range(num_scenarios):
-            block_start = kv_len + j + 2
+            block_start = kv_len + j + 1
             block_positions = torch.arange(
                 block_start,
-                block_start + draft_len,
+                block_start + mask_block_size,
                 dtype=torch.long,
                 device=device
             )
@@ -1047,9 +1052,9 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         # Build complex attention mask
         # This is the crucial part that implements TiDAR's parallel drafting
         attention_mask = self._create_tidar_attention_mask(
-            current_draft_len=current_draft_tokens.shape[1],
+            current_input_len=input_token_length,
             num_mask_blocks=num_scenarios,
-            draft_len=draft_len,
+            mask_block_size=mask_block_size,
             kv_len=kv_len,
             batch_size=batch_size,
             is_prefill=False,
@@ -1075,8 +1080,8 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         # Extract draft logits for each scenario
         all_draft_logits = []
         for j in range(num_scenarios):
-            start_idx = input_token_length + j * draft_len
-            end_idx = start_idx + draft_len
+            start_idx = input_token_length + j * mask_block_size
+            end_idx = start_idx + mask_block_size
             scenario_logits = logits[:, start_idx:end_idx, :]
             all_draft_logits.append(scenario_logits)
         
@@ -1084,9 +1089,9 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
     
     def _create_tidar_attention_mask(
         self,
-        current_draft_len: int,
+        current_input_len: int,
         num_mask_blocks: int,
-        draft_len: int,
+        mask_block_size: int,
         kv_len: int,
         batch_size: int,
         is_prefill: bool,
@@ -1112,7 +1117,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         Returns:
             attention_mask: [batch, 1, total_len, total_len + kv_len]
         """
-        total_len = current_draft_len + num_mask_blocks * draft_len
+        total_len = current_input_len + num_mask_blocks * mask_block_size
         total_seq_len = kv_len + total_len
         
         # Create mask matrix
@@ -1129,7 +1134,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         mask[:, :kv_len] = 0
         
         # 2. current_draft_tokens: causal attention to themselves
-        for i in range(current_draft_len):
+        for i in range(current_input_len):
             # Can attend to KV cache (already set above)
             # Can attend to previous draft tokens
             mask[i, kv_len:kv_len + i + 1] = 0
@@ -1137,15 +1142,15 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         # 3. Each mask_block_j
         if is_prefill:
             assert num_mask_blocks == 1
-            mask[current_draft_len:current_draft_len+draft_len, :] = 0
+            mask[current_input_len:current_input_len+mask_block_size, :] = 0
         else:
             for j in range(num_mask_blocks):
-                block_start = current_draft_len + j * draft_len
-                block_end = block_start + draft_len
+                block_start = current_input_len + j * mask_block_size
+                block_end = block_start + mask_block_size
                 
                 # Can attend to KV cache (already set)
                 # Can attend to first j tokens of current_draft
-                mask[block_start:block_end, kv_len:kv_len + j + 2] = 0
+                mask[block_start:block_end, kv_len:kv_len + j + 1] = 0
                 
                 # Block-wise bidirectional attention within the block
                 mask[block_start:block_end, kv_len + block_start:kv_len + block_end] = 0

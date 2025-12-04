@@ -22,9 +22,9 @@ def test_tidar_generation():
     # Configuration
     qwen_model_path = "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct"  # Small model for testing
     tidar_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/tidar_init"  # Small model for testing
-    draft_len = 3
+    draft_len = 8
     max_new_tokens = 50
-    prompt = "Once upon a time, "
+    # prompt = "Once upon a time, "
 
     tokenizer = AutoTokenizer.from_pretrained(qwen_model_path)
 
@@ -39,10 +39,10 @@ def test_tidar_generation():
     # )
     # print(prompt)
     
-    # conv = get_conversation_template("qwen2")
-    # conv.append_message(conv.roles[0], "Introduce Large Languag Models.")
-    # conv.append_message(conv.roles[1], None)
-    # prompt = conv.get_prompt()
+    conv = get_conversation_template("qwen2")
+    conv.append_message(conv.roles[0], "Introduce Large Languag Models.")
+    conv.append_message(conv.roles[1], None)
+    prompt = conv.get_prompt()
 
 
     print("=" * 80)
@@ -114,7 +114,7 @@ def test_tidar_generation():
     print("Test 1: Standard Autoregressive Generation")
     print("=" * 80)
     
-    existing_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/epoch_199/pytorch_model.bin"
+    existing_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/1201/epoch_40/pytorch_model.bin"
     checkpoint = torch.load(existing_model_path)
     model.load_state_dict(checkpoint, strict=True)
 
@@ -163,8 +163,8 @@ def test_tidar_generation():
         )
         total_draft_tokens += draft_tokens.shape[1]
         total_accepted_tokens += accept_length
-        if resampled_token is not None:
-            total_accepted_tokens += 1
+        # if resampled_token is not None:
+        #     total_accepted_tokens += 1
         num_iterations += 1
         return accept_length, resampled_token
     
@@ -176,7 +176,7 @@ def test_tidar_generation():
             input_ids,
             max_new_tokens=max_new_tokens,
             temperature=0.0,  # Greedy decoding
-            draft_len=draft_len,
+            block_size=draft_len,
             tokenizer=tokenizer
         )
     end_time = time.time()
