@@ -3,79 +3,20 @@ Test script for TiDAR generation
 Compares TiDAR generation with standard autoregressive generation
 """
 
+import json
+import os
 import torch
 import time
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from model.modeling_tidar_qwen2 import TiDARQwen2ForCausalLM
-import os
-import sys
 from fastchat.model import get_conversation_template
-
 from model.modeling_qwen2 import Qwen2ForCausalLM
+from model.configuration_tidar_qwen2 import TiDARQwen2Config
 
 # sys.path.append(os.path.dirname(__file__))
 
-
-def test_tidar_generation():
-    """Test TiDAR generation and compare with standard generation."""
-    
-    # Configuration
-    qwen_model_path = "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct"  # Small model for testing
-    tidar_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/tidar_init"  # Small model for testing
-    draft_len = 8
-    max_new_tokens = 50
-    # prompt = "Once upon a time, "
-
-    tokenizer = AutoTokenizer.from_pretrained(qwen_model_path)
-
-    # messages = [
-    #     {"role": "system", "content": 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\'t know the answer to a question, please don\'t share false information.'},
-    #     {"role": "user", "content": "Introduce Large Languag Models."}
-    # ]
-    # prompt = tokenizer.apply_chat_template(
-    #     messages,
-    #     tokenize=False,
-    #     add_generation_prompt=False,
-    # )
-    # print(prompt)
-    
-    conv = get_conversation_template("qwen2")
-    conv.append_message(conv.roles[0], "Introduce Large Languag Models.")
-    conv.append_message(conv.roles[1], None)
-    prompt = conv.get_prompt()
-
-
-    print("=" * 80)
-    print("TiDAR Generation Test")
-    print("=" * 80)
-    print(f"Model: {tidar_model_path}")
-    print(f"Draft Length: {draft_len}")
-    print(f"Max New Tokens: {max_new_tokens}")
-    print(f"Prompt: {prompt}")
-    print("=" * 80)
-    
-    # Load model and tokenizer
-    print("\nLoading model and tokenizer...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
-        
-    # Load TiDAR model
-    model = TiDARQwen2ForCausalLM.from_pretrained(
-        tidar_model_path,
-        block_size=draft_len,
-        clean_ratio=0.5,
-        use_tidar=True,
-        is_training=False,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        device_map=device
-    )
-    model.eval()
-    
-    # Encode prompt
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    print(f"Input length: {input_ids.shape[1]} tokens")
-    
-
+def qwen_generation():
+    pass
     # Test 0: Qwen Generation
     # print("\n" + "=" * 80)
     # print("Test 0: Standard Autoregressive Generation")
@@ -108,15 +49,96 @@ def test_tidar_generation():
     # print(f"Generated {standard_tokens} tokens in {standard_time:.2f}s")
     # print(f"Speed: {standard_speed:.2f} tokens/s")
     # print(f"\nGenerated text:\n{standard_text[len(prompt):]}")
+
+def test_tidar_generation():
+    """Test TiDAR generation and compare with standard generation."""
+    
+    # Configuration
+    qwen_model_path = "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct"  # Small model for testing
+    tidar_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/tidar_init"  # Small model for testing
+    ckpt_model_path_base = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints"
+
+    # ckpt = '1204'
+    # ckpt = '1204_sharegpt_full'
+    # ckpt = '1205_full'
+    ckpt = '1205_fulldata_fp16_11loss'
+    epoch = 'epoch_30'
+    ckpt_model_path = f"{ckpt_model_path_base}/{ckpt}/{epoch}"
+    
+    draft_len = 8
+    max_new_tokens = 50
+    # prompt = "Once upon a time, "
+
+    tokenizer = AutoTokenizer.from_pretrained(qwen_model_path)
+
+    messages = [
+        {"role": "system", "content": 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\'t know the answer to a question, please don\'t share false information.'},
+        {"role": "user", "content": "Introduce Large Languag Models."}
+    ]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    prompt += "<|im_start|>assistant\n"
+    
+    # conv = get_conversation_template("qwen2")
+    # conv.append_message(conv.roles[0], "Introduce Large Languag Models.")
+    # conv.append_message(conv.roles[1], None)
+    # prompt = conv.get_prompt()
+
+    print("=" * 80)
+    print("TiDAR Generation Test")
+    print("=" * 80)
+    print(f"Model: {ckpt_model_path}")
+    print(f"Draft Length: {draft_len}")
+    print(f"Max New Tokens: {max_new_tokens}")
+    print(f"Prompt: {prompt}")
+    print("=" * 80)
+    
+    # Load model and tokenizer
+    print("\nLoading model and tokenizer...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+        
+    # Load TiDAR model
+    # model = TiDARQwen2ForCausalLM.from_pretrained(
+    #     ckpt_model_path,
+    #     block_size=draft_len,
+    #     clean_ratio=0.5,
+    #     use_tidar=True,
+    #     is_training=False,
+    #     torch_dtype=torch.bfloat16,
+    #     device_map=device,
+    #     trust_remote_code=True
+    # )
+
+    config_file = os.path.join("/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/tidar_init", "config.json")
+    with open(config_file, 'r', encoding='utf-8') as f:
+        config_dict = json.load(f)
+    config = TiDARQwen2Config(**config_dict)
+    model_file = os.path.join(ckpt_model_path, "pytorch_model.bin")
+    state_dict = torch.load(model_file, map_location="cuda", weights_only=True)
+    
+    model = TiDARQwen2ForCausalLM(config)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    
+    model.eval()
+
+    # Encode prompt
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    print(f"Input length: {input_ids.shape[1]} tokens")
+    
     
     # Test 1: Standard Generation
     print("\n" + "=" * 80)
     print("Test 1: Standard Autoregressive Generation")
     print("=" * 80)
     
-    existing_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/1201/epoch_40/pytorch_model.bin"
-    checkpoint = torch.load(existing_model_path)
-    model.load_state_dict(checkpoint, strict=True)
+    # existing_model_path = "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/tidar_checkpoints/1204/epoch_30/pytorch_model.bin"
+    # checkpoint = torch.load(existing_model_path)
+    # model.load_state_dict(checkpoint, strict=True)
 
     torch.cuda.empty_cache() if device == "cuda" else None
     
@@ -135,11 +157,13 @@ def test_tidar_generation():
     standard_tokens = standard_output.shape[1] - input_ids.shape[1]
     standard_speed = standard_tokens / standard_time
     
-    standard_text = tokenizer.decode(standard_output[0], skip_special_tokens=True)
+    full_text = tokenizer.decode(standard_output[0], skip_special_tokens=False)
+    standard_text = tokenizer.decode(standard_output[0][input_ids.shape[-1]:], skip_special_tokens=False)
     
     print(f"Generated {standard_tokens} tokens in {standard_time:.2f}s")
     print(f"Speed: {standard_speed:.2f} tokens/s")
-    print(f"\nGenerated text:\n{standard_text[len(prompt):]}")
+    print(f"\nGenerated text:\n{standard_text}")
+    # print(f"\nFull text:\n{full_text}")
     
     # Test 2: TiDAR Generation
     print("\n" + "=" * 80)
@@ -188,7 +212,8 @@ def test_tidar_generation():
     tidar_tokens = tidar_output.shape[1] - input_ids.shape[1]
     tidar_speed = tidar_tokens / tidar_time
     
-    tidar_text = tokenizer.decode(tidar_output[0], skip_special_tokens=True)
+    full_text = tokenizer.decode(tidar_output[0], skip_special_tokens=False)
+    tidar_text = tokenizer.decode(tidar_output[0][input_ids.shape[-1]:], skip_special_tokens=False)
     
     # Calculate statistics
     acceptance_rate = (total_accepted_tokens / total_draft_tokens * 100) if total_draft_tokens > 0 else 0
@@ -202,7 +227,8 @@ def test_tidar_generation():
     print(f"  Total accepted tokens: {total_accepted_tokens}")
     print(f"  Acceptance rate: {acceptance_rate:.2f}%")
     print(f"  Avg accepted per iteration: {avg_accepted_per_iter:.2f}")
-    print(f"\nGenerated text:\n{tidar_text[len(prompt):]}")
+    print(f"\nGenerated text:\n{tidar_text}")
+    # print(f"\nFull text:\n{full_text}")
     
     # Comparison
     print("\n" + "=" * 80)

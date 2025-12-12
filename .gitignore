@@ -3,3 +3,5 @@ train_data/*
 ckpts/*
 gumiho/train/ckpts-cloudml/*
 log/*
+tidar/train/runs
+tidar/train/tidar_checkpoints

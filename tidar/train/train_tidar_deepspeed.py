@@ -31,15 +31,6 @@ parser = argparse.ArgumentParser(description='TiDAR Training')
 parser.add_argument('--config_path', type=str, default='tidar/train_config.json',
                     help='Path to the training configuration file')
 parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
-parser.add_argument('--existing_model_path', type=str, help='Path to existing model checkpoint to resume from')
-
-# TiDAR-specific arguments
-# parser.add_argument('--qwen_model_path', type=str, default="Qwen/Qwen2.5-1.5B",
-#                     help='Path to the Qwen2.5 base model')
-# parser.add_argument('--tidar_block_size', type=int, default=8,
-#                     help='Block size for block-wise bidirectional attention')
-# parser.add_argument('--tidar_clean_ratio', type=float, default=0.5,
-#                     help='Ratio of clean tokens in the sequence')
 
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
@@ -54,7 +45,7 @@ if os.path.exists(args.config_path):
 
 # Set default values for required arguments
 if not hasattr(args, 'data_dir'):
-    args.data_dir = './train_data'
+    args.data_dir = ['./train_data']
 if not hasattr(args, 'ckpt_dir'):
     args.ckpt_dir = './tidar_checkpoints'
 if not hasattr(args, 'num_epochs'):
@@ -91,13 +82,14 @@ if rank == 0:
     logger.info(f"Arguments: {args}")
 
 
-def list_files(path):
+def list_files(paths):
     """Recursively list all files in a directory"""
     datapath = []
-    for root, directories, files in os.walk(path, followlinks=True):
-        for file in files:
-            file_path = os.path.join(root, file)
-            datapath.append(file_path)
+    for path in paths:
+        for root, directories, files in os.walk(path, followlinks=True):
+            for file in files:
+                file_path = os.path.join(root, file)
+                datapath.append(file_path)
     return datapath
 
 
@@ -130,6 +122,11 @@ class CustomDataset(Dataset):
         original_loss_mask = data['loss_mask'][:self.max_len]  # Load loss_mask
         seq_length = len(original_input_ids)  # S
         
+        if isinstance(original_input_ids, list):
+            original_input_ids = torch.tensor(original_input_ids, dtype=torch.long)
+        if isinstance(original_loss_mask, list):
+            original_loss_mask = torch.tensor(original_loss_mask, dtype=torch.long)
+
         # 1. Construct input_ids: [clean_tokens, MASK_tokens] (2S length)
         clean_tokens = original_input_ids  # [t1, t2, ..., tS]
         masked_tokens = torch.full((seq_length,), self.mask_token_id, dtype=torch.long)  # [MASK, MASK, ..., MASK]
@@ -148,15 +145,10 @@ class CustomDataset(Dataset):
         # 3. Construct loss_mask: [AR_loss_mask, Diffusion_loss_mask] (2S length)
         # AR loss_mask: shifted by 1 to match AR labels, last position is 0
         ar_loss_mask = torch.cat([
-            original_loss_mask[1:],  # Shift mask to align with shifted labels
+            original_loss_mask[:-1],
             torch.tensor([0], dtype=torch.long)  # No loss for last position
         ])
-        # Diffusion loss_mask: same as original (all positions contribute to diffusion loss)
-        diffusion_loss_mask = torch.cat([
-            torch.tensor([0], dtype=torch.long),  # No loss for first position
-            original_loss_mask[1:],  # Shift mask to align with shifted labels
-        ])  # [m1, m2, ..., mS]
-        loss_mask = torch.cat([ar_loss_mask, diffusion_loss_mask])  # Length 2S
+        loss_mask = torch.cat([ar_loss_mask, ar_loss_mask])  # Length 2S
         
         # 4. Construct position_ids: [0..S-1, 0..S-1] (restarting for masked region)
         position_ids = torch.cat([
@@ -206,17 +198,15 @@ class DataCollatorWithPadding:
         # Position i can attend to position j if j <= i
         for i in range(seq_length):
             mask[i, :i+1] = 1
-        
-        # Bottom-left: Masked -> Clean (Full mask)
-        # All masked positions can attend to all clean positions
-        mask[seq_length:, :seq_length] = 1
-        
-        # Bottom-right: Masked -> Masked (Block-wise bidirectional)
-        # For simplicity in training, use full bidirectional within masked region
-        # (In inference, this would be block-wise)
-        mask[seq_length:, seq_length:] = 1
-        
-        # Top-right: Clean -> Masked (Zero mask) - already initialized to 0
+
+        for i in range(seq_length, total_length, self.block_size):
+            block_end = min(i + self.block_size, total_length)
+            # Bottom-right:
+            # Within each block, tokens can attend to each other (bidirectional)
+            mask[i:block_end, i:block_end] = 1
+            # Bottom-left:
+            if i > seq_length: # start from second block
+                mask[i:block_end, :i-seq_length] = 1
         
         return mask
     
@@ -365,7 +355,7 @@ def compute_tidar_loss(logits, labels, loss_mask, seq_lengths, args):
     
     # Combine losses with weights
     total_loss = (args.ar_loss_weight * ar_loss + 
-                  args.diffusion_loss_weight * diffusion_loss)
+                  args.diffusion_loss_weight * diffusion_loss) / (args.ar_loss_weight + args.diffusion_loss_weight)
     
     # Calculate accuracy (only on positions with loss_mask > 0)
     with torch.no_grad():
@@ -395,26 +385,25 @@ if tokenizer.pad_token is None:
 
 # Load data
 datapath = list_files(args.data_dir)
-traindatapath = datapath[:int(len(datapath) * 0.95)]
-testdatapath = datapath[int(len(datapath) * 0.95):]
+traindatapath = datapath[:int(len(datapath) * 1)]
+# testdatapath = datapath[int(len(datapath) * 0.95):]
 
 traindataset = CustomDataset(
     traindatapath, 
     tokenizer, 
-    max_len=args.max_len
+    max_len=args.max_len,
 )
-testdataset = CustomDataset(
-    testdatapath,
-    tokenizer,
-    max_len=args.max_len
-)
+print("Training data size: ", len(traindataset))
+# testdataset = CustomDataset(
+#     testdatapath,
+#     tokenizer,
+#     max_len=args.max_len
+# )
 
 # Create checkpoint directory
 if rank == 0:
     if not os.path.exists(args.ckpt_dir):
         os.makedirs(args.ckpt_dir)
-    if not os.path.exists(args.model_name):
-        os.makedirs(args.model_name)
 
 # Initialize TiDAR model
 if rank == 0:
@@ -431,7 +420,7 @@ if use_existing_tidar_init:
     
     model = TiDARQwen2ForCausalLM.from_pretrained(
         pretrained_model_name_or_path=tidar_init_checkpoint,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         is_training=True,
         device_map=None  # Will be handled by DeepSpeed
     )
@@ -447,7 +436,7 @@ else:
         clean_ratio=args.tidar_clean_ratio,
         use_tidar=True,
         is_training=True,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         device_map=None  # Will be handled by DeepSpeed
     )
     

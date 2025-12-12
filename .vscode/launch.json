@@ -2,17 +2,40 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Test TiDAR Generate",
+            "name": "Test TiDAR Generate",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/tidar/test_tidar_generate.py",
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "4",
                 "PYTHONPATH": "${workspaceFolder}"
             },
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug Train tidar (Single GPU)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tidar/train/train_tidar_deepspeed.py",
+            "args": [
+                "--deepspeed",
+                "--deepspeed_config",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/ds_config_debug.json",
+                "--config_path",
+                "train_config.json",
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "4",
+                "TOKENIZERS_PARALLELISM": "false",
+                "WANDB_MODE": "disabled"
+            },
+            "cwd": "${workspaceFolder}/tidar/train",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
         },
         {
             "name": "Debug Eval (Single GPU)",
@@ -201,6 +224,72 @@
                 "WANDB_MODE": "disabled"
             },
             "cwd": "${workspaceFolder}/gumiho/train",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        },
+        {
+            "name": "Debug GenData LLaMA3",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "gumiho.ge_data.allocation",
+            "args": [
+                "--outdir",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data",
+                "--start",
+                "0",
+                "--end",
+                "10",
+                "--num_processes",
+                "2",
+                "--gpus",
+                "0,1,2,3|4,5,6,7",
+                "--model_path",
+                "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct",
+                "--dataset_path",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Datasets/ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_unfiltered_cleaned_split.json",
+                "--max_length",
+                "2048"
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "python"
+        },
+        {
+            "name": "Debug GenData LLaMA3 (Single Process)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/gumiho/ge_data/ge_data_all_llama3.py",
+            "args": [
+                "--start",
+                "0",
+                "--end",
+                "68000",
+                "--index",
+                "0",
+                "--gpu_index",
+                "0",
+                "--outdir",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data/Qwen2.5-1.5B-Instruct/ultrachat_200k/0_10_mufp16",
+                "--model_path",
+                "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct",
+                "--dataset_path",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Datasets/ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_unfiltered_cleaned_split.json",
+                "--max_length",
+                "2048",
+                "--system_prompt",
+                "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+            ],
+            "env": {
+                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false,
             "python": "python"

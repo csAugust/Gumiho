@@ -17,6 +17,8 @@ from .modeling_qwen2 import (
 )
 from .configuration_tidar_qwen2 import TiDARQwen2Config
 
+import os
+from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
@@ -481,14 +483,16 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
     2. Diffusion head: Generates new draft tokens
     3. Single forward pass: Both tasks in parallel
     """
-    
+    config_class = TiDARQwen2Config 
+    _no_split_modules = ["TiDARDecoderLayer"]
+
     def __init__(self, config: TiDARQwen2Config):
         super().__init__(config)
-        # Replace model with TiDAR version
         self.model = TiDARModel(config)
         
         # TiDAR-specific components
         self.tidar_config = config.tidar_config
+        print(self.tidar_config)
         
         # Additional heads for TiDAR (can be added later)
         # self.validation_head = nn.Linear(config.hidden_size, config.vocab_size)
@@ -521,8 +525,6 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
         Returns:
             TiDARQwen2ForCausalLM: Model loaded from checkpoint
         """
-        import os
-        from transformers import AutoConfig, AutoModelForCausalLM
         
         # Try to load configuration to detect model type
         try:
@@ -817,7 +819,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             batch_size=batch_size,
             is_prefill=True,
             device=device,
-            dtype=torch.float16
+            dtype=self.dtype
         )
         prefill_outputs = self.model(
             input_ids=prefill_input,
@@ -1059,7 +1061,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             batch_size=batch_size,
             is_prefill=False,
             device=device,
-            dtype=torch.float16
+            dtype=self.dtype
         )
         
         # Forward pass
@@ -1193,3 +1195,7 @@ class TiDARQwen2ForCausalLM(Qwen2ForCausalLM):
             tokens.append(token)
         
         return torch.cat(tokens, dim=1)
+
+
+AutoConfig.register("tidar_qwen2", TiDARQwen2Config)
+AutoModelForCausalLM.register(TiDARQwen2Config, TiDARQwen2ForCausalLM)
