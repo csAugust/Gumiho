@@ -231,17 +231,7 @@ class SpAFModel(nn.Module):
         Returns:
             SpAFModel instance.
         """
-        # Default SpAF configuration
-        if spaf_config is None:
-            spaf_config = {
-                'enable_spaf': True,
-                'cutoff_layer': None,  # Will be set based on model size
-                'adapter_dim_ratio': 0.25,
-                'alignment_head': {
-                    'num_layers': 2,
-                    'hidden_dim_ratio': 2.0,
-                },
-            }
+        assert spaf_config is not None
         
         # Load base model
         base_model = KVLlamaForCausalLM.from_pretrained(

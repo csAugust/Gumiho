@@ -1,0 +1,30 @@
+{
+  "data_dir": [
+    "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data/gumiho/Llama-3.1-8B-Instruct/ShareGPT_V4.3_unfiltered_cleaned_split.json"
+  ],
+  "ckpt_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/dynaspec/train/dynaspec_ckpts/l3_8b/",
+  "base_model_path": "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct",
+  "new_model_config_path": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/dynaspec/train/configs/base/dynaspec-LLaMA3-Instruct-8B.json",
+  "model_name": "dynaspec_llama3_8b",
+  "logger_file": "training",
+
+  "data_noise": false,
+  "noise_type": "uniform",
+  "noise_mean": 0.0,
+  "noise_std": 0.2,
+  
+  "num_epochs": 100,
+  "start_epoch": 0,
+  "existing_model_path": null,
+  "save_interval": 10,
+  "max_len": 4096,
+  "num_workers": 4,
+  "run_mode": "train",
+  
+  "tidar_block_size": 8,
+  "tidar_clean_ratio": 0.5,
+  
+  "ar_loss_weight": 1,
+  "diffusion_loss_weight": 1
+  
+}

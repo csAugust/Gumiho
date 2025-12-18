@@ -1,7 +1,6 @@
 __pycache__
-train_data/*
-ckpts/*
-gumiho/train/ckpts-cloudml/*
-log/*
+train_data
+ckpts
+log
 tidar/train/runs
 tidar/train/tidar_checkpoints

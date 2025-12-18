@@ -1,8 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-Hybrid-AgileDrafter DeepSpeed 训练脚本
-基于 Gumiho 和 TiDAR 的 DeepSpeed 训练流程
-"""
 
 import argparse
 import deepspeed
@@ -14,8 +10,10 @@ import sys
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dynaspec.hybrid_model import HybridAgileDrafterModel
-from dynaspec.loss import compute_hybrid_loss, compute_accuracy
+from dynaspec.model.configs import DrafterConfig
+from dynaspec.model.hybrid_agile_drafter import HybridAgileDrafter, load_single_tensor
+from dynaspec.model.hybrid_model import HybridAgileDrafterModel
+from dynaspec.model.loss import compute_hybrid_loss, compute_accuracy
 
 import torch
 import torch.nn as nn
@@ -24,6 +22,7 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Any, Dict, List
 from tqdm import tqdm
 from safetensors import safe_open
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -71,13 +70,14 @@ if rank == 0:
 
 
 # ===== Data Loading Utilities =====
-def list_files(path):
+def list_files(paths):
     """Recursively list all files in a directory"""
     datapath = []
-    for root, directories, files in os.walk(path, followlinks=True):
-        for file in files:
-            file_path = os.path.join(root, file)
-            datapath.append(file_path)
+    for path in paths:
+        for root, directories, files in os.walk(path, followlinks=True):
+            for file in files:
+                file_path = os.path.join(root, file)
+                datapath.append(file_path)
     return datapath
 
 
@@ -182,31 +182,25 @@ class DataCollatorWithPadding:
 
 
 # ===== Load LLM Head =====
-if rank == 0:
-    logger.info("Loading LLM head...")
+# if rank == 0:
+#     logger.info("Loading LLM head...")
 
-try:
-    with open(os.path.join(args.basepath, "model.safetensors.index.json"), "r") as f:
-        index_json = json.loads(f.read())
-        head_path = index_json["weight_map"]["lm_head.weight"]
-    with safe_open(os.path.join(args.basepath, head_path),
-                   framework="pt",
-                   device="cpu") as f:
-        tensor_slice = f.get_slice("lm_head.weight")
-        vocab_size, hidden_dim = tensor_slice.get_shape()
-        tensor = tensor_slice[:, :hidden_dim].float()
-except:
-    with open(os.path.join(args.basepath, "pytorch_model.bin.index.json"), "r") as f:
-        index_json = json.loads(f.read())
-        head_path = index_json["weight_map"]["lm_head.weight"]
-    weights = torch.load(os.path.join(args.basepath, head_path))
-    tensor = weights["lm_head.weight"].float()
-
-head = torch.nn.Linear(tensor.shape[1], tensor.shape[0], bias=False)
-head.weight.data = tensor
-
-for param in head.parameters():
-    param.requires_grad = False
+# try:
+#     with open(os.path.join(args.base_model_path, "model.safetensors.index.json"), "r") as f:
+#         index_json = json.loads(f.read())
+#         head_path = index_json["weight_map"]["lm_head.weight"]
+#     with safe_open(os.path.join(args.base_model_path, head_path),
+#                    framework="pt",
+#                    device="cpu") as f:
+#         tensor_slice = f.get_slice("lm_head.weight")
+#         vocab_size, hidden_dim = tensor_slice.get_shape()
+#         tensor = tensor_slice[:, :hidden_dim].float()
+# except:
+#     with open(os.path.join(args.base_model_path, "pytorch_model.bin.index.json"), "r") as f:
+#         index_json = json.loads(f.read())
+#         head_path = index_json["weight_map"]["lm_head.weight"]
+#     weights = torch.load(os.path.join(args.base_model_path, head_path))
+#     tensor = weights["lm_head.weight"].float()
 
 
 # ===== Prepare Data =====
@@ -223,9 +217,10 @@ else:
     aug = None
 
 datapath = list_files(args.data_dir)
-traindatapath = datapath[:int(len(datapath) * 1.0)]  # Use all data for training
-
+traindatapath = datapath[:int(len(datapath) * 0.95)]
+testdatapath = datapath[int(len(datapath) * 0.95):]
 traindataset = CustomDataset(traindatapath, transform=aug, max_len=args.max_len)
+testdataset = CustomDataset(testdatapath)
 
 if rank == 0:
     logger.info(f"Training data size: {len(traindataset)}")
@@ -240,43 +235,24 @@ if rank == 0:
 if rank == 0:
     logger.info("Initializing Hybrid-AgileDrafter model...")
 
-# Load config
-if os.path.exists(args.configpath):
-    with open(args.configpath, 'r') as f:
-        model_config_dict = json.load(f)
-    model_config = type('Config', (), model_config_dict)()
-else:
-    # Use default config from args
-    model_config = type('Config', (), {
-        'num_mlp_blocks': args.num_mlp_blocks,
-        'num_transformer_blocks': args.num_transformer_blocks,
-        'gumbel_temperature': args.gumbel_temperature
-    })()
 
-# Initialize HybridAgileDrafterModel
-model = HybridAgileDrafterModel.from_pretrained(
-    base_model_path=args.basepath,
-    config_path=args.configpath if os.path.exists(args.configpath) else None,
-    torch_dtype=torch.float16,
-    device_map=None  # Will be handled by DeepSpeed
-)
+config = DrafterConfig.from_pretrained(args.new_model_config_path)
+tokenizer = AutoTokenizer.from_pretrained(args.base_model_path)
 
-# Freeze base_model parameters
-for param in model.base_model.parameters():
+model = HybridAgileDrafter(config, args, tokenizer)
+model.embed_tokens.weight.data = load_single_tensor(args.base_model_path, "model.embed_tokens.weight")
+
+_head_tensor = load_single_tensor(args.base_model_path, "lm_head.weight")
+head = torch.nn.Linear(_head_tensor.shape[1], _head_tensor.shape[0], bias=False)
+head.weight.data = _head_tensor
+
+for param in head.parameters():
+    param.requires_grad = False
+for param in model.embed_tokens.parameters():
     param.requires_grad = False
 
-# Only train draft_model
-for param in model.draft_model.parameters():
-    param.requires_grad = True
-
-if rank == 0:
-    total_params = sum(p.numel() for p in model.draft_model.parameters())
-    trainable_params = sum(p.numel() for p in model.draft_model.parameters() if p.requires_grad)
-    logger.info(f"Draft model - Total params: {total_params:,}, Trainable: {trainable_params:,}")
-
-
 # ===== Load Existing Checkpoint (if specified) =====
-if args.existing_model_path is not None:
+if args.existing_model_path is not None and args.start_epoch > 0:
     if rank == 0:
         logger.info(f"Loading checkpoint from {args.existing_model_path}")
     
@@ -292,8 +268,8 @@ if args.existing_model_path is not None:
 # ===== Initialize DeepSpeed =====
 model_engine, optimizer, train_loader, _ = deepspeed.initialize(
     args=args,
-    model=model.draft_model,  # Only train draft_model
-    model_parameters=model.draft_model.parameters(),
+    model=model,
+    model_parameters=model.parameters(),
     training_data=traindataset,
     collate_fn=DataCollatorWithPadding()
 )
@@ -302,9 +278,6 @@ model_engine, optimizer, train_loader, _ = deepspeed.initialize(
 head_engine = head.half().to(rank)
 head_engine.eval()
 
-# Move base_model to device
-model.base_model = model.base_model.to(rank)
-model.base_model.eval()
 
 if rank == 0:
     logger.info(f"Training started with batch size: {model_engine.train_batch_size()}")
@@ -347,15 +320,10 @@ for epoch in range(args.start_epoch, args.num_epochs):
         attention_mask = data["attention_mask"].to(rank)
         loss_mask = data["loss_mask"].to(rank)
         
-        # Get draft model output
-        # Note: We need to get inputs_embeds from base_model
-        with torch.no_grad():
-            inputs_embeds = model.base_model.model.embed_tokens(input_ids)
-        
         # Draft forward pass
         draft_logits, gating_probs = model_engine(
-            inputs=inputs_embeds.half(),
-            llm_hidden_state=hidden_states,
+            input_ids=input_ids,
+            hidden_states=hidden_states,
             attention_mask=attention_mask
         )
         

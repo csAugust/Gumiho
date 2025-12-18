@@ -24,7 +24,7 @@
                 "--deepspeed_config",
                 "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/ds_config_debug.json",
                 "--config_path",
-                "train_config.json",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/tidar/train/configs/base/train_config.json",
             ],
             "env": {
                 "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
@@ -44,53 +44,12 @@
             "module": "gumiho.evaluation.gen_gumiho_answer_llama3chat",
             "args": [
                 "--config_path",
-                "${workspaceFolder}/scripts/eval_config.json"
+                "${workspaceFolder}/gumiho/evaluation/configs/eval_config.json"
             ],
             "env": {
                 "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
                 "CUDA_VISIBLE_DEVICES": "0",
                 "TOKENIZERS_PARALLELISM": "false"
-            },
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "python": "python"
-        },
-        {
-            "name": "Debug Eval (Fast Test)",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "gumiho.evaluation.gen_gumiho_answer_llama3chat",
-            "args": [
-                "--config_path",
-                "${workspaceFolder}/scripts/eval_config.json"
-            ],
-            "env": {
-                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
-                "TOKENIZERS_PARALLELISM": "false"
-            },
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "python": "python"
-        },
-        {
-            "name": "Debug Eval (Distributed)",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "gumiho.evaluation.gen_gumiho_answer_llama3chat",
-            "args": [
-                "--config_path",
-                "${workspaceFolder}/scripts/eval_config.json"
-            ],
-            "env": {
-                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0,1,2,3",
-                "TOKENIZERS_PARALLELISM": "false",
-                "LOCAL_RANK": "0",
-                "WORLD_SIZE": "4",
-                "RANK": "0"
             },
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -184,58 +143,13 @@
             "python": "python"
         },
         {
-            "name": "Debug Train (Fast Test)",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/gumiho/train/main_deepspeed.py",
-            "args": [
-                "--deepspeed",
-                "--deepspeed_config",
-                "ds_config_debug.json",
-                "--tmpdir",
-                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data",
-                "--cpdir",
-                "./ckpts-debug",
-                "--configpath",
-                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/Gumiho-LLaMA3-Instruct-8B.json",
-                "--basepath",
-                "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct",
-                "--logger_file",
-                "debug_test",
-                "--p_w",
-                "0.1",
-                "--mlp_v_w",
-                "1.0",
-                "--mlp_p_w",
-                "100",
-                "--max_len",
-                "256",
-                "--model_name",
-                "l3_8b_test",
-                "--start_epoch",
-                "0",
-                "--run_mode",
-                "debug"
-            ],
-            "env": {
-                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
-                "TOKENIZERS_PARALLELISM": "false",
-                "WANDB_MODE": "disabled"
-            },
-            "cwd": "${workspaceFolder}/gumiho/train",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "python": "python"
-        },
-        {
             "name": "Debug GenData LLaMA3",
             "type": "debugpy",
             "request": "launch",
-            "module": "gumiho.ge_data.allocation",
+            "module": "tidar.data.ge_data.allocation",
             "args": [
                 "--outdir",
-                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data",
+                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data/1212",
                 "--start",
                 "0",
                 "--end",
@@ -254,40 +168,6 @@
             "env": {
                 "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
                 "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"
-            },
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "python": "python"
-        },
-        {
-            "name": "Debug GenData LLaMA3 (Single Process)",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/gumiho/ge_data/ge_data_all_llama3.py",
-            "args": [
-                "--start",
-                "0",
-                "--end",
-                "68000",
-                "--index",
-                "0",
-                "--gpu_index",
-                "0",
-                "--outdir",
-                "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data/Qwen2.5-1.5B-Instruct/ultrachat_200k/0_10_mufp16",
-                "--model_path",
-                "/mnt/bos-text/models/hf_models/Qwen2.5-1.5B-Instruct",
-                "--dataset_path",
-                "/mnt/user-ssd/chenzhiyang1/workspace/Datasets/ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_unfiltered_cleaned_split.json",
-                "--max_length",
-                "2048",
-                "--system_prompt",
-                "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-            ],
-            "env": {
-                "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0"
             },
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",

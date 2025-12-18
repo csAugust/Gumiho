@@ -21,15 +21,17 @@
   "data": {
     "data_dir": "./train_data",
     "num_workers": 2,
-    "data_noise": true,
+    "data_noise": false,
     "noise_type": "uniform",
     "noise_mean": 0.0,
     "noise_std": 0.2
   },
   "paths": {
-    "basepath": "/path/to/llama-3-8b",
-    "configpath": "dynaspec/config.json",
-    "ckpt_dir": "./checkpoints/hybrid_agile_ds"
+    "data_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/train_data/gumiho/Llama-3.1-8B-Instruct/ShareGPT_V4.3_unfiltered_cleaned_split.json",
+    "ckpt_dir": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/ckpts/l3_8b/",
+    "configpath": "/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/dynaspec/config.json",
+    "basepath": "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct",
+    "tokenizer_path": "/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct"
   },
   "logging": {
     "logger_file": "hybrid_agile_deepspeed"

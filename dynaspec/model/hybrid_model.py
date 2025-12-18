@@ -13,7 +13,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gumiho.model.modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
-from dynaspec.hybrid_agile_drafter import HybridAgileDrafter
+from dynaspec.model.hybrid_agile_drafter import HybridAgileDrafter
 from transformers import AutoTokenizer, AutoConfig
 
 
