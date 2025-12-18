@@ -1,0 +1,40 @@
+{
+  "training": {
+    "num_epochs": 20,
+    "start_epoch": 0,
+    "save_interval": 5,
+    "test_freq": 1,
+    "run_mode": "train",
+    "max_len": 2048
+  },
+  "model": {
+    "model_name": "hybrid_agile",
+    "num_mlp_blocks": 2,
+    "num_transformer_blocks": 3,
+    "gumbel_temperature": 1.0
+  },
+  "loss_weights": {
+    "cost_lambda": 0.01,
+    "mlp_cost": 1.0,
+    "transformer_cost": 5.0
+  },
+  "data": {
+    "data_dir": "./train_data",
+    "num_workers": 2,
+    "data_noise": true,
+    "noise_type": "uniform",
+    "noise_mean": 0.0,
+    "noise_std": 0.2
+  },
+  "paths": {
+    "basepath": "/path/to/llama-3-8b",
+    "configpath": "dynaspec/config.json",
+    "ckpt_dir": "./checkpoints/hybrid_agile_ds"
+  },
+  "logging": {
+    "logger_file": "hybrid_agile_deepspeed"
+  },
+  "optimizer": {
+    "grad_clip": 0.5
+  }
+}

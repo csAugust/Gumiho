@@ -1,0 +1,17 @@
+{
+  "num_mlp_blocks": 2,
+  "num_transformer_blocks": 3,
+  "gumbel_temperature": 1.0,
+  "cost_lambda": 0.01,
+  "mlp_cost": 1.0,
+  "transformer_cost": 5.0,
+  "description": "Hybrid-AgileDrafter 配置文件",
+  "notes": {
+    "num_mlp_blocks": "MLP 块数量（轻量级，成本低）",
+    "num_transformer_blocks": "Transformer 块数量（重量级，成本高但效果好）",
+    "gumbel_temperature": "Gumbel-Softmax 温度，控制软/硬选择的平滑程度",
+    "cost_lambda": "成本损失的权重系数，控制计算效率与准确率的平衡",
+    "mlp_cost": "每个 MLP 块的单位成本（相对值）",
+    "transformer_cost": "每个 Transformer 块的单位成本（相对值），建议设为 MLP 的 3-10 倍"
+  }
+}
