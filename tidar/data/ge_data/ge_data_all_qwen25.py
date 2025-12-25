@@ -1,0 +1,316 @@
+import argparse
+import os
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset
+
+parser = argparse.ArgumentParser(description='Generate training data for LLaMA3')
+parser.add_argument('--start', type=int, default=0, help='Start index for data range')
+parser.add_argument('--end', type=int, default=100, help='End index for data range')
+parser.add_argument('--index', type=int, default=1, help='Process index')
+parser.add_argument('--gpu_index', type=int, nargs='+', default=[0], help='GPU indices to use')
+parser.add_argument('--outdir', type=str, default='outdir0', help='Output directory')
+parser.add_argument('--model_path', type=str, default='/mnt/bos-text/models/hf_models/Llama-3.1-8B-Instruct', help='Path to the model')
+parser.add_argument('--dataset_path', type=str, default='/mnt/user-ssd/chenzhiyang1/workspace/Datasets/ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_unfiltered_cleaned_split.json', help='Path to the dataset')
+parser.add_argument('--max_length', type=int, default=2048, help='Maximum sequence length')
+parser.add_argument('--system_prompt', type=str, default='You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\'t know the answer to a question, please don\'t share false information.', help='System prompt for the model')
+args = parser.parse_args()
+
+
+def longest_common_prefix(list1, list2):
+    prefix_length = 0
+    min_length = min(len(list1), len(list2))
+
+    for i in range(min_length):
+        if list1[i] == list2[i]:
+            prefix_length += 1
+        else:
+            break
+
+    common_prefix = list1[:prefix_length]
+    return common_prefix, prefix_length
+
+def build_dataset_rank_ultrachat(
+        tokenizer, split="train_sft",
+        select=None,
+):
+    ds = load_dataset(args.dataset_path, split=split)
+    ds = ds.shuffle(seed=42)
+    ds1 = ds.select(range(args.start, args.end))
+    original_columns1 = ds1.column_names
+    num_proc = 4
+
+    # ultrachat_200k roles: "user", "assistant", "system"
+    role_map = {
+        "user": "human",
+        "assistant": "gpt",
+        "system": "system",
+    }
+
+    def preprocess_function(examples):
+        new_examples = {
+            "conversation": [],
+            "input_ids": [],
+            "loss_mask": []
+        }
+
+        batch_messages_list = examples["messages"]
+        for i, message_list in enumerate(batch_messages_list):
+            source = []
+            for m in message_list:
+                if m["role"] == "system":
+                    continue  # system 单独加，不在 source 里
+
+                hf_role = m["role"]   # user / assistant
+                if hf_role not in role_map:
+                    continue
+
+                mapped_role = role_map[hf_role]   # human / gpt
+
+                source.append({
+                    "from": mapped_role,
+                    "value": m["content"]
+                })
+
+            messages = [
+                {"role": "system", "content": args.system_prompt},
+            ]
+            convroles = ["user", "assistant"]
+            roles = {"human": "user", "gpt": "assistant"}
+
+            # Skip first if not human
+            if len(source) == 0 or roles[source[0]["from"]] != "user":
+                source = source[1:]
+
+            for j, sentence in enumerate(source):
+                role = roles[sentence["from"]]
+                assert role == convroles[j % 2], f"{i}"
+                messages.append(
+                    {"role": role, "content": sentence["value"]}
+                )
+            conversation = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+
+            if not tokenizer.pad_token_id:
+                tokenizer.pad_token_id = tokenizer.unk_token_id
+
+            input_ids = tokenizer(
+                conversation,
+                return_tensors="pt",
+                max_length=args.max_length,
+                add_special_tokens=False,
+                truncation=True,
+            ).input_ids[0]
+            loss_mask = torch.ones_like(input_ids)
+
+            # sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            sep = "<|im_start|>assistant\n"
+            # sep2="<|eot_id|><|start_header_id|>user<|end_header_id|>"
+            sep2 = "<|im_start|>user\n"
+
+            turns = conversation.split(sep2)
+            turns[1] = turns[0] + sep2 + turns[1]
+            turns = turns[1:]
+
+            cur_len = 0
+            loss_mask[:cur_len] = 0
+            for turn_id, turn in enumerate(turns):
+                if turn == "":
+                    # raise Exception(f"Empty turn in data point {examples['id'][i]}")
+                    print(f"Empty turn in data point {examples['id'][i]}")
+                    break
+
+                turn_len = len(tokenizer(turn).input_ids)
+
+                parts = turn.split(sep)
+                if len(parts) != 2:
+                    # raise Exception(f"No assistant response in data point {examples['id'][i]}")
+                    print(f"No assistant response in data point {examples['id'][i]}")
+                    break
+
+                if turn_id > 0:
+                    parts[0] = sep2 + parts[0] + sep
+                else:
+                    parts[0] = parts[0] + sep
+
+                instruction_len = len(tokenizer(parts[0]).input_ids)
+
+                # Ignore the user instructions
+                loss_mask[cur_len: cur_len + instruction_len] = 0
+                cur_len += turn_len
+
+            loss_mask[cur_len:] = 0
+
+            new_examples["conversation"].append(conversation)
+            new_examples["input_ids"].append(input_ids[None, :])
+            new_examples["loss_mask"].append(loss_mask[None, :])
+
+        return new_examples
+
+    ds1 = ds1.map(
+        preprocess_function,
+        batched=True,
+        # num_proc=num_proc,
+        remove_columns=original_columns1,
+        load_from_cache_file=False
+    )
+
+    return ds1
+
+def build_dataset_rank_sharegpt(
+        tokenizer, split="train",
+        select=None,
+):
+    ds = load_dataset('json', data_files=args.dataset_path)
+    ds = ds['train']
+    ds = ds.shuffle(seed=42)
+    ds1 = ds.select(range(args.start, args.end))
+    original_columns1 = ds1.column_names
+    num_proc = 4
+
+    def preprocess_function(examples):
+        new_examples = {
+            "conversation":[],
+            "input_ids": [],
+            "loss_mask": []
+        }
+        for i in range(len(examples['id'])):
+            messages = [
+                {"role": "system", "content": args.system_prompt},
+            ]
+            convroles=["user","assistant"]
+            roles = {"human": "user", "gpt": "assistant"}
+            source = examples['conversations'][i]
+            if roles[source[0]["from"]] != "user":
+                # Skip the first one if it is not from human
+                source = source[1:]
+            for j, sentence in enumerate(source):
+                role = roles[sentence["from"]]
+                assert role == convroles[j % 2], f"{i}"
+                messages.append(
+                    {"role": role, "content": sentence["value"]}
+                )
+            conversation=tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+
+            if not tokenizer.pad_token_id:
+                tokenizer.pad_token_id=tokenizer.unk_token_id
+
+            input_ids = tokenizer(
+                conversation,
+                return_tensors="pt",
+                max_length=args.max_length,
+                add_special_tokens=False,
+                truncation=True,
+            ).input_ids[0]
+            loss_mask=torch.ones_like(input_ids)
+
+            # sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            sep = "<|im_start|>assistant\n"
+            # sep2="<|eot_id|><|start_header_id|>user<|end_header_id|>"
+            sep2 = "<|im_start|>user\n"
+
+            turns = conversation.split(sep2)
+            turns[1] = turns[0] + sep2 + turns[1]
+            turns = turns[1:]
+
+            cur_len = 0
+            loss_mask[:cur_len] = 0
+            for turn_id, turn in enumerate(turns):
+                if turn == "":
+                    # raise Exception(f"Empty turn in data point {examples['id'][i]}")
+                    print(f"Empty turn in data point {examples['id'][i]}")
+                    break
+
+                turn_len = len(tokenizer(turn).input_ids)
+
+                parts = turn.split(sep)
+                if len(parts) != 2:
+                    # raise Exception(f"No assistant response in data point {examples['id'][i]}")
+                    print(f"No assistant response in data point {examples['id'][i]}")
+                    break
+
+                if turn_id > 0:
+                    parts[0] = sep2 + parts[0] + sep
+                else:
+                    parts[0] = parts[0] + sep
+
+                instruction_len = len(tokenizer(parts[0]).input_ids)
+
+                # Ignore the user instructions
+                loss_mask[cur_len: cur_len + instruction_len] = 0
+                cur_len += turn_len
+                
+            loss_mask[cur_len:] = 0
+
+            new_examples["conversation"].append(conversation)
+            new_examples["input_ids"].append(input_ids[None,:])
+            new_examples["loss_mask"].append(loss_mask[None,:])
+
+        return new_examples
+
+    ds1 = ds1.map(
+        preprocess_function,
+        batched=True,
+        # num_proc=num_proc,
+        remove_columns=original_columns1,
+        load_from_cache_file=False
+    )
+
+    ds1.set_format(type="torch")
+    return ds1
+
+
+@torch.no_grad()
+def ge_ultrachat(data):
+    input_ids=data["input_ids"]
+    td={"input_ids":input_ids[0],"loss_mask":data["loss_mask"][0]}
+    return td
+
+@torch.no_grad()
+def ge_sharegpt(data):
+    input_ids=data["input_ids"]
+    td={"input_ids":input_ids.cpu()[0],"loss_mask":data["loss_mask"].cpu()[0]}
+    return td
+
+
+bigname = args.model_path
+bigtokenizer = AutoTokenizer.from_pretrained(bigname,use_fast=False)
+
+if args.dataset_path.split('/')[-1] == "ShareGPT_V4.3_unfiltered_cleaned_split.json":
+    ds = build_dataset_rank_sharegpt(bigtokenizer)
+else:
+    ds = build_dataset_rank_ultrachat(bigtokenizer)
+print(ds)
+
+# bigmodel = AutoModelForCausalLM.from_pretrained(bigname,  device_map="cuda", torch_dtype=torch.float16)
+# bigmodel.eval()
+
+outdir = f'{args.outdir}/{args.index}'
+if not os.path.exists(outdir):
+    os.makedirs(outdir, exist_ok=True)
+
+def writedata(name,data_point):
+    if not os.path.exists(name):
+        os.makedirs(name, exist_ok=True)
+    current_length=len(os.listdir(name))
+    idx=current_length
+    torch.save(data_point, f'{name}/data_{idx}.ckpt')
+
+
+for id,data in enumerate(ds):
+    if id % 100==0:
+        print(id,end="\t")
+    if id % 1000 == 0:
+        print("")
+    if args.dataset_path.split('/')[-1] == "ShareGPT_V4.3_unfiltered_cleaned_split.json":
+        outdata = ge_sharegpt(data)
+    else:
+        outdata = ge_ultrachat(data)
+    writedata(outdir,outdata)

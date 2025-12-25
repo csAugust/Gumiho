@@ -51,7 +51,7 @@ def run_command(cmd):
 
 
 if not os.path.exists(outdir):
-    os.makedirs(outdir, exist_ok=True)
+    os.makedirs(outdir)
 
 
 data_a = split_range(s, e, num_p, over=True)
@@ -63,8 +63,11 @@ for i in range(num_p):
     gpu_index = gpus[i]
     gpu_index_str = ' '.join(map(str, gpu_index))
     cuda_visible_str = ','.join(map(str, gpu_index))
-    command = "CUDA_VISIBLE_DEVICES={} python3 gumiho/ge_data/ge_data_all_llama3.py --start={} --end={} --index={} --gpu_index {} --outdir {} --model_path {} --dataset_path {} --max_length {}".format(
+    command = "CUDA_VISIBLE_DEVICES={} python3 tidar/data/ge_data/ge_data_all_qwen25.py --start={} --end={} --index={} --gpu_index {} --outdir {} --model_path {} --dataset_path {} --max_length {}".format(
         cuda_visible_str, start, end, index, gpu_index_str, outdir, args.model_path, args.dataset_path, args.max_length)
+    # distributed = "torchrun --nproc_per_node=$RESOURCE_GPU --nnodes=$WORLD_SIZE --node_rank=$RANK --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT gumiho/ge_data/ge_data_all_llama3.py --start={} --end={} --index={} --gpu_index {} --outdir {} --model_path {} --dataset_path {} --max_length {}".format(
+    #     start, end, index, gpu_index_str, outdir, args.model_path, args.dataset_path, args.max_length)
+    # command = distributed
     # Add system_prompt if provided
     if args.system_prompt:
         command += " --system_prompt '{}'".format(args.system_prompt.replace("'", "'\"'\"'"))

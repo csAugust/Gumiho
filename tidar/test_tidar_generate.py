@@ -61,8 +61,9 @@ def test_tidar_generation():
     # ckpt = '1204'
     # ckpt = '1204_sharegpt_full'
     # ckpt = '1205_full'
-    ckpt = '1205_fulldata_fp16_11loss'
-    epoch = 'epoch_30'
+    # ckpt = '1205_fulldata_fp16_11loss'
+    ckpt = '1215_nomask_newpad_fixlr'
+    epoch = 'epoch_40'
     ckpt_model_path = f"{ckpt_model_path_base}/{ckpt}/{epoch}"
     
     draft_len = 8
@@ -70,6 +71,19 @@ def test_tidar_generation():
     # prompt = "Once upon a time, "
 
     tokenizer = AutoTokenizer.from_pretrained(qwen_model_path)
+    print(tokenizer.mask_token_id)
+
+    new_special_token = "[MASK]"
+    if new_special_token not in tokenizer.get_vocab():
+        num_added_tokens = tokenizer.add_special_tokens({'additional_special_tokens': [new_special_token]})
+        print(f"成功添加了 {num_added_tokens} 个新 token: {new_special_token}")
+    else:
+        print(f"Token '{new_special_token}' 已经存在于词表中。")
+    print("新的 Tokenizer 词表大小:", tokenizer.vocab_size)
+    mask_token_id = tokenizer.convert_tokens_to_ids(new_special_token)
+    tokenizer.mask_token_id = mask_token_id
+    print(f"新 token '{new_special_token}' 的 ID 是: {mask_token_id}")
+
 
     messages = [
         {"role": "system", "content": 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\'t know the answer to a question, please don\'t share false information.'},
@@ -121,6 +135,7 @@ def test_tidar_generation():
     state_dict = torch.load(model_file, map_location="cuda", weights_only=True)
     
     model = TiDARQwen2ForCausalLM(config)
+    model.resize_token_embeddings(len(tokenizer))
     model.load_state_dict(state_dict)
     model.to(device)
     

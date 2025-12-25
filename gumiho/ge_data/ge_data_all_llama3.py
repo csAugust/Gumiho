@@ -150,8 +150,33 @@ bigtokenizer = AutoTokenizer.from_pretrained(bigname,use_fast=False)
 ds = build_dataset_rank(bigtokenizer)
 print(ds)
 
-bigmodel = AutoModelForCausalLM.from_pretrained(bigname,  device_map="auto",torch_dtype=torch.float16)
+# Determine the device - use cuda:0 since CUDA_VISIBLE_DEVICES remaps the GPUs
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+num_gpus = torch.cuda.device_count()
+print(f"Loading model on device: {device}, Number of visible GPUs: {num_gpus}")
+
+# Load model - avoid device_map="auto" which triggers torch.distributed
+# Instead, use sequential device mapping or single GPU
+if num_gpus > 1:
+    # When multiple GPUs are visible, use sequential device_map to avoid torch.distributed
+    # This will automatically spread the model across GPUs without requiring distributed initialization
+    bigmodel = AutoModelForCausalLM.from_pretrained(
+        bigname,
+        device_map="sequential",  # Sequential avoids torch.distributed initialization
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True
+    )
+else:
+    # Single GPU case - load directly to GPU
+    bigmodel = AutoModelForCausalLM.from_pretrained(
+        bigname,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True
+    )
+    bigmodel.to(device)
+
 bigmodel.eval()
+
 
 @torch.no_grad()
 def ge(data):
@@ -166,11 +191,11 @@ def ge(data):
 
 outdir = f'{args.outdir}/{args.index}'
 if not os.path.exists(outdir):
-    os.makedirs(outdir)
+    os.makedirs(outdir, exist_ok=True)
 
 def writedata(name,data_point):
     if not os.path.exists(name):
-        os.makedirs(name)
+        os.makedirs(name, exist_ok=True)
     current_length=len(os.listdir(name))
     idx=current_length
     torch.save(data_point, f'{name}/data_{idx}.ckpt')
