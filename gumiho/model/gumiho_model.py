@@ -119,22 +119,23 @@ class GumihoModel(nn.Module):
         else:
             raise ValueError
 
-        if args.model_name == "llama3_70b":
-            configpath="./gumiho/train/Gumiho-LLaMA3-Instruct-70B.json"
-        elif args.model_name == "l2_7b":
-            configpath="./gumiho/train/llama_2_chat_7B_config.json"
-        elif args.model_name == "v7b":
-            configpath="./gumiho/train/vicuna_7B_config.json"
-        elif args.model_name == "v13b":
-            configpath="./gumiho/train/vicuna_13B_config.json"
-        elif args.model_name == "l2_70b":
-            configpath="./gumiho/train/llama_2_chat_70B_config.json"
-        elif args.model_name == "l2_13b":
-            configpath="./gumiho/train/llama_2_chat_13B_config.json"
-        elif args.model_name == "l3_8b":
-            configpath="/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/Gumiho-LLaMA3-Instruct-8B.json"
-        else:
-            raise ValueError
+        configpath = args.configpath
+        # if args.model_name == "llama3_70b":
+        #     configpath="./gumiho/train/Gumiho-LLaMA3-Instruct-70B.json"
+        # elif args.model_name == "l2_7b":
+        #     configpath="./gumiho/train/llama_2_chat_7B_config.json"
+        # elif args.model_name == "v7b":
+        #     configpath="./gumiho/train/vicuna_7B_config.json"
+        # elif args.model_name == "v13b":
+        #     configpath="./gumiho/train/vicuna_13B_config.json"
+        # elif args.model_name == "l2_70b":
+        #     configpath="./gumiho/train/llama_2_chat_70B_config.json"
+        # elif args.model_name == "l2_13b":
+        #     configpath="./gumiho/train/llama_2_chat_13B_config.json"
+        # elif args.model_name == "l3_8b":
+        #     configpath="/mnt/user-ssd/chenzhiyang1/workspace/Train/Gumiho/gumiho/train/configs/base/Gumiho-LLaMA3-Instruct-8B.json"
+        # else:
+        #     raise ValueError
      
         load_model_path=os.path.join(gumiho_model_path, "pytorch_model.bin")
         if not os.path.exists(load_model_path):

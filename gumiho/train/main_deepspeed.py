@@ -10,6 +10,8 @@ import os
 # Import config loader
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+import torch.nn.functional as F
 from gumiho.train.config_loader import ConfigLoader
 
 parser = argparse.ArgumentParser(description='sp')
@@ -256,7 +258,16 @@ def top_accuracy(output, target, topk=(1,)):
 
 
 
-def compute_loss(target, target_p, predict, loss_mask, topk_loss_num=0, args=None):
+def create_gating_target(target_hidden_states, head_engine, threshold, rank):
+    with torch.no_grad():
+        target_logits = head_engine(target_hidden_states.to(rank).half())
+        target_probs = nn.Softmax(dim=-1)(target_logits)
+        max_probs, _ = torch.max(target_probs, dim=-1)
+        g_target = (max_probs < threshold).float()
+    return g_target
+
+
+def compute_loss(target, target_p, predict, loss_mask, topk_loss_num=0, args=None, gating_output=None, head_engine=None):
 
     ploss_mlp, vloss_mlp = 0, 0
     mlp_metric = {}
@@ -317,7 +328,21 @@ def compute_loss(target, target_p, predict, loss_mask, topk_loss_num=0, args=Non
         topk_loss = -torch.sum(torch.sum(loss_mask * plogp.gather(dim=2, index=topk_mask), 2)) / (loss_mask.sum() + 1e-5)
         vloss = vloss + topk_loss
 
-    return vloss, ploss, vloss_mlp, ploss_mlp, out_head, mlp_metric
+    loss_gate = 0
+    gating_acc_count = (0, 0)
+    if gating_output is not None and hasattr(args, 'gating_weight') and args.gating_weight > 0:
+        g_target = create_gating_target(target, head_engine, getattr(args, 'gating_threshold_easy', 0.9), rank)
+        valid_mask = loss_mask[:,:,0]
+        loss_gate = F.binary_cross_entropy_with_logits(gating_output, g_target, reduction="none")
+        loss_gate = torch.sum(loss_gate * valid_mask) / (valid_mask.sum() + 1e-5)
+        
+        with torch.no_grad():
+            g_pred = (torch.sigmoid(gating_output) >= 0.5).float()
+            gating_correct_count = ((g_pred == g_target) * valid_mask).sum().item()
+            gating_total_count = valid_mask.sum().item()
+            gating_acc_count = (gating_correct_count, gating_total_count)
+
+    return vloss, ploss, vloss_mlp, ploss_mlp, out_head, mlp_metric, loss_gate, gating_acc_count
 
 
 
@@ -410,6 +435,8 @@ for epoch in range(args.start_epoch, num_epochs):
     num_batches = 0
     model.train()
     original_loss = 0
+    gating_correct = 0
+    gating_total = 0
 
     if rank == 0:
         tqdm_desc = f"Epoch {epoch}"
@@ -427,19 +454,33 @@ for epoch in range(args.start_epoch, num_epochs):
 
         model_engine.zero_grad()
 
-        predict = model_engine(data["hidden_states"].to(rank).half(), input_ids=data["input_ids"].to(rank),
+        model_output = model_engine(data["hidden_states"].to(rank).half(), input_ids=data["input_ids"].to(rank),
                                attention_mask=data["attention_mask"].to(rank).half())
+        if len(model_output) == 3:
+            predict, _, gating_output = model_output
+        else:
+            predict, gating_output = model_output
+
         with torch.no_grad():
             target_head = head_engine(data["target"].to(rank).half())
             target_p = nn.Softmax(dim=2)(target_head)
-            target_p = target_p.detach() # target LLM 的预测 logits
+            target_p = target_p.detach()
 
         loss_mask = data["loss_mask"][:, :, None].to(rank)
-        vloss, ploss, vloss_mlp, ploss_mlp, out_head, mlp_metric = compute_loss(data["target"], target_p, predict, loss_mask, args.topk_loss_num, args)
+        vloss, ploss, vloss_mlp, ploss_mlp, out_head, mlp_metric, loss_gate, gating_acc_count = compute_loss(
+            data["target"], target_p, predict, loss_mask, args.topk_loss_num, args, 
+            gating_output=gating_output, head_engine=head_engine)
+        
+        gating_correct += gating_acc_count[0]
+        gating_total += gating_acc_count[1]
+        
         if args.mlp_p_w == 0:
             loss = args.v_w * vloss + args.p_w * ploss + args.mlp_v_w * vloss_mlp/args.mlp_loss_weight
         else:
             loss = args.v_w * vloss + args.p_w * ploss + args.mlp_v_w * vloss_mlp/args.mlp_loss_weight + args.mlp_p_w * ploss_mlp/args.mlp_loss_weight
+        
+        if hasattr(args, 'gating_weight') and args.gating_weight > 0 and loss_gate != 0:
+            loss += args.gating_weight * loss_gate
 
         model_engine.backward(loss)
         model_engine.step()
@@ -462,7 +503,13 @@ for epoch in range(args.start_epoch, num_epochs):
                        "train/ploss": ploss.item(), "train/mlp_ploss": ploss_mlp.item(), "train/mlp_vloss": vloss_mlp.item(), "train/loss": loss.item(), "train/acc": cc / ct,
                        "avg_acc":  correct / (total + 1e-5)}
             
-            # Log to TensorBoard
+            if loss_gate !=0:
+                logdict["train/gating_loss"] = loss_gate.item() if isinstance(loss_gate, torch.Tensor) else loss_gate
+            
+            if gating_total > 0:
+                logdict["train/gating_acc"] = gating_acc_count[0] / (gating_acc_count[1] + 1e-5)
+                logdict["avg_gating_acc"] = gating_correct / (gating_total + 1e-5)
+            
             for key, value in logdict.items():
                 writer.add_scalar(key, value, epoch * len(train_loader) + batch_idx)
             for key, value in mlp_metric.items():
@@ -473,7 +520,7 @@ for epoch in range(args.start_epoch, num_epochs):
             
 
         del ploss, vloss
-        epoch_loss += loss.item()
+        epoch_loss += loss.detach().item()
         num_batches += 1
 
     
@@ -484,10 +531,13 @@ for epoch in range(args.start_epoch, num_epochs):
         logger.info('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
         logger.info(f"{epoch=}, {correct=}, {total=}")
         logger.info('Train Accuracy: {:.2f}%'.format(100 * correct / (total + 1e-5)))
-        # Log epoch metrics to TensorBoard
+        if gating_total > 0:
+            logger.info('Gating Accuracy: {:.2f}%'.format(100 * gating_correct / (gating_total + 1e-5)))
         writer.add_scalar("train/epochacc", correct / (total + 1e-5), epoch)
         writer.add_scalar("train/epochloss", epoch_loss, epoch)
         writer.add_scalar("epoch", epoch, epoch)
+        if gating_total > 0:
+            writer.add_scalar("train/epoch_gating_acc", gating_correct / (gating_total + 1e-5), epoch)
         
     if args.run_mode == "train" and (epoch % args.save_interval == 0 or epoch == num_epochs - 1):
         model_engine.save_16bit_model(f"{args.ckpt_dir}/state_{epoch}")

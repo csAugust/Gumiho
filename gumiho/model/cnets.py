@@ -537,6 +537,26 @@ class ParallelMLPs(nn.Module):
             outputs.append(mlp(x))
         return outputs 
 
+class GatingNetwork(nn.Module):
+    def __init__(self, input_dim: int, num_choices: int):
+        super().__init__()
+        self.input_dim = input_dim
+        self.num_choices = num_choices
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, input_dim // 2),
+            nn.ReLU(),
+            nn.Linear(input_dim // 2, num_choices)
+        )
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden_state: LLM 隐藏状态
+                - shape: [batch_size, seq_len, input_dim] 或 [batch_size, input_dim]
+        """
+        logits = self.mlp(hidden_state).squeeze(-1)  # [batch_size, num_choices]
+        return logits
+
 
 class Model(nn.Module):
     def __init__(self, config, load_emb=False, path=None, bias=True, total_tokens=63, depth=5, top_k=10, threshold=1.0, args=None, tokenizer=None):
@@ -590,6 +610,11 @@ class Model(nn.Module):
         self.lenth_norm = None
 
         self.tokenizer = tokenizer
+        if hasattr(args, 'gating_weight') and args.gating_weight > 0:
+            print("Init with gating network")
+            self.gating_network = GatingNetwork(config.hidden_size, 1)
+        else:
+            self.gating_network = None
 
     def init_tree(self):
         self.tree_mask_init = torch.eye(self.args.top_k, device=self.embed_tokens.weight.device)[None, None]
@@ -700,6 +725,10 @@ class Model(nn.Module):
         inputs_embeds = inputs_embeds.to(hidden_states.dtype)
         hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
 
+        gating_output = None
+        if mode == "train" and self.gating_network is not None:
+            gating_output = self.gating_network(hidden_states)
+
         all_hidden_states = () if output_hidden_states else None
         next_decoder_cache = () if use_cache else None
         
@@ -743,9 +772,9 @@ class Model(nn.Module):
 
         elif mode == "train":
             if use_cache:
-                return ret_hidden_states, next_decoder_cache
+                return ret_hidden_states, next_decoder_cache, gating_output
             else:
-                return ret_hidden_states
+                return ret_hidden_states, gating_output
        
         else:
             raise NotImplementedError("Wrong Mode")
@@ -990,6 +1019,217 @@ class Model(nn.Module):
                 
                 tree_mask[:,:,last_valid_elements[:negative_num], most_common] = True
          
+        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids
+
+    @torch.no_grad()
+    def topK_genrate_with_gating(self, hidden_states, input_ids, head, logits_processor):
+        input_ids = input_ids.to(hidden_states.device)
+        total_tokens = self.args.total_tokens - 1
+        top_k = self.args.top_k
+        sample_token = input_ids[:, -1]
+        
+        scores_list = []
+        parents_list = []
+        ss_token = []
+        
+        input_ids = input_ids[:, 1:]
+        input_ids = input_ids.to(hidden_states.device)
+        len_posi = input_ids.shape[1]
+        self.reset()
+        
+        if hasattr(self, "stable_kv") and self.stable_kv is not None:
+            kv_len = self.stable_kv[0][0].shape[2]
+            out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:, kv_len:],
+                                               past_key_values=self.stable_kv, use_cache=True, mode="gumiho_generate")
+        else:
+            out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True, mode="gumiho_generate")
+        self.stable_kv = past_key_values
+        last_hidden = out_hidden[:, -1]
+        
+        last_headout = head(last_hidden)
+        last_p = self.logsoftmax(last_headout)
+        top = torch.topk(last_p, top_k, dim=-1)
+        topk_index, topk_p = top.indices, top.values
+        scores = topk_p[0].view(-1)
+        scores_list.append(scores)
+        parents_list.append(torch.zeros(top_k, dtype=torch.long, device=scores.device))
+        ss_token.append(topk_index.view(-1))
+        
+        input_ids = topk_index
+        input_hidden = last_hidden[None].repeat(1, top_k, 1)
+        
+        gating_threshold = getattr(self.args, 'gating_threshold', 0.5)
+        use_gating = hasattr(args, 'gating_weight') and args.gating_weight > 0
+        
+        gating_decision = None
+        if use_gating:
+            with torch.no_grad():
+                gating_logits = self.gating_network(input_hidden[:, 0, :].unsqueeze(1))
+                gating_prob = torch.sigmoid(gating_logits)
+                gating_decision = (gating_prob < gating_threshold).item()
+        
+        if use_gating and gating_decision:
+            TwoLayerDecoderNum = 0
+        else:
+            TwoLayerDecoderNum = self.args.depth - self.mlp_num
+        
+        mlp_input_ids = [input_ids.view(-1, 1)]
+        mlp_input_hidden_states = [input_hidden.view(-1, 1, self.config.hidden_size)]
+        
+        _, max_index = torch.max(scores, dim=0)
+        previous_score_num = scores.numel()
+        bias = 1
+        
+        for i in range(TwoLayerDecoderNum):
+            position_ids = len_posi + self.position_ids
+            out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
+                                            position_ids=position_ids, use_cache=True, mode="gumiho_generate")
+            len_posi += 1
+            
+            last_headout = head(out_hidden[0].half())
+            last_p = self.logsoftmax(last_headout)
+            top = torch.topk(last_p, top_k, dim=-1)
+            topk_index, topk_p = top.indices, top.values
+            
+            cu_scores = topk_p + scores[:, None]
+            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+            topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
+            scores = topk_cs_p
+            
+            out_ids = topk_cs_index // top_k
+            input_hidden = out_hidden[:, out_ids]
+            input_ids = topk_index.view(-1)[topk_cs_index][None]
+            
+            parents = (out_ids + bias)
+            parents_list.append(parents)
+            bias += ss_token[-1].numel()
+            
+            mlp_input_ids.append(input_ids.view(-1, 1))
+            mlp_input_hidden_states.append(input_hidden.view(-1, 1, self.config.hidden_size))
+            
+            ss_token.append(input_ids.view(-1))
+            scores_list.append(scores.view(-1))
+            previous_score_num += scores.numel()
+        
+        mlp_input_hidden = torch.cat(mlp_input_hidden_states, dim=1)[:,-2:]
+        mlp_input_ids = torch.cat(mlp_input_ids, dim=1)[:,-2:]
+        
+        out_hidden = self(mlp_input_hidden, input_ids=mlp_input_ids, mode="mlp_generate")
+        out_hidden = torch.cat(out_hidden, dim=1)
+        mlp_gen_token_num = out_hidden.shape[1]
+        mlp_topk = self.args.mlptopk
+        pruning = self.args.pruning
+        
+        _out_hidden = out_hidden.view(-1, self.config.hidden_size)
+        _head_out = head(_out_hidden.half())
+        combined_head_out = _head_out.view(top_k, mlp_gen_token_num, self.config.vocab_size)
+        
+        mlp_input_indices = torch.arange(0, top_k, device=combined_head_out.device)
+        current_parents = torch.arange(0, top_k, device=combined_head_out.device)
+        for mlp_i in range(mlp_gen_token_num):
+            last_headout = combined_head_out[mlp_input_indices, mlp_i, :]
+            last_p = self.logsoftmax(last_headout)
+            top = torch.topk(last_p, mlp_topk, dim=-1)
+            token_index, token_p = top.indices, top.values
+            
+            cu_scores = token_p + scores[:, None]
+            cu_scores = cu_scores.view(-1)
+            
+            if pruning > 0:
+                mlp_top = torch.topk(cu_scores, pruning)
+                mlp_cs_index, mlp_cs_p = mlp_top.indices, mlp_top.values
+                scores = mlp_cs_p
+                mlp_parents_indices = mlp_cs_index // mlp_topk
+                current_parents = current_parents[mlp_parents_indices]
+                parents = (current_parents + bias)
+                parents_list.append(parents)
+                bias += ss_token[-1].numel()
+                mlp_input_indices = mlp_input_indices[mlp_parents_indices]
+            
+            scores_num = scores.numel()
+            topk_cs_index = torch.arange(0, scores_num, 1, device=combined_head_out.device)
+            selected_token = token_index.view(-1)[mlp_cs_index]
+            ss_token.append(selected_token)
+            scores_list.append(scores)
+            previous_score_num += scores.numel()
+            current_parents = topk_cs_index
+        
+        scores_list = torch.cat(scores_list, dim=0).view(-1)
+        ss_token_list = torch.cat(ss_token, dim=0).view(-1)
+        parents_list = torch.cat(parents_list, dim=0).view(-1)
+        
+        top_scores = torch.topk(scores_list, total_tokens, dim=-1)
+        top_scores_index = top_scores.indices
+        top_scores_index = torch.sort(top_scores_index).values
+        draft_tokens = ss_token_list[top_scores_index]
+        draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
+        draft_parents = parents_list[top_scores_index].long()
+        
+        mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)
+        mask_index[draft_parents == 0] = -1
+        mask_index = mask_index + 1
+        mask_index_list = mask_index.tolist()
+        tree_mask = torch.eye(total_tokens + 1).bool()
+        tree_mask[:, 0] = True
+        for i in range(total_tokens):
+            tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
+        
+        tree_position_ids = torch.sum(tree_mask, dim=1) - 1
+        tree_mask = tree_mask.float()[None, None]
+        draft_tokens = draft_tokens[None]
+        
+        del parents_list, scores_list, ss_token, ss_token_list, draft_parents
+        
+        max_depth = torch.max(tree_position_ids) + 1
+        noleaf_index = torch.unique(mask_index).tolist()
+        noleaf_num = len(noleaf_index) - 1
+        leaf_num = total_tokens - noleaf_num
+        
+        retrieve_indices = torch.zeros(leaf_num, max_depth.item(), dtype=torch.long) - 1
+        retrieve_indices = retrieve_indices.tolist()
+        
+        rid = 0
+        position_ids_list = tree_position_ids.tolist()
+        
+        for i in range(total_tokens + 1):
+            if i not in noleaf_index:
+                cid = i
+                depth = position_ids_list[i]
+                for j in reversed(range(depth + 1)):
+                    retrieve_indices[rid][j] = cid
+                    cid = mask_index_list[cid - 1]
+                rid += 1
+        
+        if logits_processor is not None:
+            maxitem = total_tokens + 5
+            def custom_sort(lst):
+                sort_keys = []
+                for i in range(len(lst)):
+                    sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)
+                return sort_keys
+            retrieve_indices = sorted(retrieve_indices, key=custom_sort)
+        
+        retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
+        del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
+        tree_position_ids = tree_position_ids.to(hidden_states.device)
+        
+        if self.args.complete_mask == 1:
+            rows, cols = retrieve_indices.shape
+            non_negative_mask = retrieve_indices != -1
+            negative_row_num = (retrieve_indices[:, -1] == -1).sum()
+            negative_col_num = (retrieve_indices[0, :] == -1).sum()
+            first_negative_one = non_negative_mask.long().argmin(dim=1)
+            row_indices = torch.arange(negative_row_num)
+            last_valid_elements = retrieve_indices[row_indices, first_negative_one[:negative_row_num] - 1]
+            
+            for col in range(cols-negative_col_num, cols):
+                col_values = retrieve_indices[:, col][non_negative_mask[:, col]]
+                values, counts = torch.unique(col_values, return_counts=True)
+                most_common = values[counts.argmax()]
+                negative_num = (retrieve_indices[:, col] == -1).sum().item()
+                retrieve_indices[:, col] = torch.where(retrieve_indices[:, col] == -1, most_common, retrieve_indices[:, col])
+                tree_mask[:,:,last_valid_elements[:negative_num], most_common] = True
+        
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids
 
     @torch.no_grad()
